@@ -14,7 +14,8 @@
   ],
   "scripts": {
     "start": "node src/server.mjs",
-    "test": "node --test 'test/*.test.mjs'"
+    "test": "node --test 'test/*.test.mjs'",
+    "build:binary": "bun build src/server.mjs --compile --outfile dist/deepgrep"
   },
   "engines": {
     "node": ">=18"

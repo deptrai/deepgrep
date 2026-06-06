@@ -339,3 +339,63 @@ When ready, call the "answer" tool with XML:
 
 If no relevant files exist, return: <ANSWER></ANSWER>
 Aim to return at most {max_results} files.`;
+
+// ─── Error UX ──────────────────────────────────────────────
+
+/**
+ * Parse a "reset after Xs" or "reset after Xm Ys" hint from a 429 error body.
+ * @param {string} text
+ * @returns {string|null} human-readable reset time, or null
+ */
+function _parseResetHint(text) {
+  if (!text) return null;
+  const m = text.match(/reset after\s+(?:(\d+)m\s*)?(?:(\d+)s)?/i);
+  if (m && (m[1] || m[2])) {
+    const mins = parseInt(m[1] || "0", 10);
+    const secs = parseInt(m[2] || "0", 10);
+    if (mins === 0 && secs === 0) return null;
+    if (mins > 0) return `${mins}m ${secs}s`;
+    return `${secs}s`;
+  }
+  return null;
+}
+
+/**
+ * Convert a raw API error into a user-friendly, actionable message.
+ * Called AFTER retries are exhausted — do NOT say "retrying" here.
+ *
+ * @param {Error} err — error thrown from _callOpenAI (after retry exhaustion)
+ * @param {string} model — model that failed
+ * @returns {string} friendly message
+ */
+export function friendlyError(err, model) {
+  const msg = err?.message || String(err);
+  const status = err?.status;
+
+  if (status === 429 || msg.includes("429")) {
+    const reset = _parseResetHint(msg);
+    const waitStr = reset ? ` or wait ${reset}` : "";
+    return (
+      `Model "${model}" rate limited after retries.` +
+      `\nTry: set DEEPGREP_MODEL=deep-search (uses combo routing with fallback)${waitStr}.` +
+      `\nAlternatively: cx/gpt-5.5 or kr/claude-sonnet-4.6`
+    );
+  }
+
+  if (status === 403 || msg.includes("403")) {
+    return (
+      `Model "${model}" is not accessible with this API key.` +
+      `\nTry: DEEPGREP_MODEL=deep-search or DEEPGREP_MODEL=cx/gpt-5.5`
+    );
+  }
+
+  if (status === 401 || msg.includes("401")) {
+    return (
+      `Authentication failed. Check your DEEPGREP_API_KEY.` +
+      `\nGet a free key at: https://deepgrep.chainlens.net`
+    );
+  }
+
+  // Generic fallback
+  return `Search failed: ${msg.slice(0, 150)}`;
+}

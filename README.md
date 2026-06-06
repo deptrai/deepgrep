@@ -46,13 +46,13 @@ deepgrep "trace the auth flow" → 4 files, done.
 
 ## Quick Start
 
+### Option A: npx (recommended)
+
 ### 1. Get a free API key
 
 → [deepgrep.chainlens.net](https://deepgrep.chainlens.net)
 
-### 2. Add to your MCP client
-
-#### Kiro
+### 2. Add to your MCP client#### Kiro
 
 Add to `~/.kiro/settings/mcp.json`:
 
@@ -105,12 +105,61 @@ Settings → MCP → Add server → command: `npx -y deepgrep`, env: `DEEPGREP_A
 
 ### 3. Done! Ask your code anything.
 
-## Two Search Modes
+### Option B: Standalone binary (no Node required)
+
+```bash
+# Download binary (macOS example):
+curl -L https://github.com/deptrai/deepgrep/releases/latest/download/deepgrep-macos -o deepgrep
+chmod +x deepgrep
+```
+
+Or build from source (requires [Bun](https://bun.sh)):
+```bash
+git clone https://github.com/deptrai/deepgrep
+cd deepgrep && npm install
+npm run build:binary   # outputs dist/deepgrep
+```
+
+Then configure your MCP client with:
+```json
+"command": "/path/to/deepgrep"
+```
+
+## MCP Tools
+
+deepgrep exposes three tools:
+
+### `deepgrep_search` — Fast mode (quick)
+
+### `deepgrep_deep` — Deep mode (thorough)
 
 | Mode | Tool | Speed | Best for |
 |------|------|-------|----------|
 | **Fast** | `deepgrep_search` | ~3-5s | Quick lookups, simple queries |
 | **Deep** | `deepgrep_deep` | ~20-30s | Complex tracing, architecture, multi-hop |
+
+`deepgrep_search` supports `auto_escalate=true` (default): automatically switches to deep mode for complex queries or empty results.
+
+### `deepgrep_status` — Health check
+
+No parameters. Returns:
+- ✅/❌ API key validity
+- ✅/❌/⚠️ Model availability (rate limited, unauthorized, etc.)
+- ✅/⚠️ Devin Desktop detection
+- Current configuration summary
+
+```
+deepgrep status
+
+✅ API key: valid
+✅ Endpoint: https://router.chainlens.net/v1
+✅ deep-search: available
+✅ Devin Desktop: detected (fast mode auto-key OK)
+
+Config: fast_backend=windsurf, deep_model=deep-search
+```
+
+Use this to verify your setup or debug configuration issues.
 
 Both use your `DEEPGREP_API_KEY`. One key, both modes.
 
@@ -181,6 +230,9 @@ deepgrep works with **any OpenAI-compatible API**:
 | `DEEPGREP_MODEL` | `deep-search` | Model for deep search |
 | `DEEPGREP_FAST_BACKEND` | `windsurf` | Fast mode backend: `openai` or `windsurf` |
 | `DEEPGREP_FAST_MODEL` | — | Model for fast mode (when `FAST_BACKEND=openai`) |
+| `DEEPGREP_CACHE_DISABLED` | — | Set `1` to disable result cache (legacy: `FC_CACHE_DISABLED`) |
+| `DEEPGREP_CACHE_TTL_MS` | `300000` (5min) | Cache TTL in ms (legacy: `FC_CACHE_TTL_MS`) |
+| `DEEPGREP_CACHE_MAX_ENTRIES` | `200` | Max cached entries before eviction (legacy: `FC_CACHE_MAX_ENTRIES`) |
 | `DEEPGREP_NO_TELEMETRY` | — | Set `1` to disable anonymous stats |
 
 ## Parameters
@@ -195,6 +247,7 @@ Both tools accept:
 | `max_results` | 10 | Max files to return (1-30) |
 | `exclude_paths` | [] | Patterns to exclude (e.g. `["node_modules", "dist"]`) |
 | `include_snippets` | false | Include actual code content in results |
+| `auto_escalate` | true | Auto-switch to deep mode for complex queries or empty results (deepgrep_search only) |
 
 `deepgrep_search` also accepts `max_turns` (1-5, default 3).
 
@@ -256,3 +309,172 @@ List all models: `curl -H "Authorization: Bearer KEY" https://router.chainlens.n
 ## License
 
 MIT
+
+## Configuration for All ADEs (AI Development Environments)
+
+deepgrep works with any MCP-compatible client. Below is how to configure it for each ADE, plus where to put your agent steering/rules so the AI knows **when** to use deepgrep.
+
+### MCP Server Configuration
+
+#### Kiro
+
+`~/.kiro/settings/mcp.json` (user-level) or `.kiro/settings/mcp.json` (workspace):
+
+```json
+{
+  "mcpServers": {
+    "deepgrep": {
+      "command": "npx",
+      "args": ["-y", "deepgrep"],
+      "env": {
+        "DEEPGREP_API_KEY": "your-key",
+        "DEEPGREP_FAST_BACKEND": "openai",
+        "DEEPGREP_FAST_MODEL": "kr/claude-haiku-4.5"
+      },
+      "autoApprove": ["*"]
+    }
+  }
+}
+```
+
+#### Claude Code
+
+```bash
+# Add the MCP server
+claude mcp add deepgrep -- npx -y deepgrep
+
+# Set environment variables (in your shell profile or .env)
+export DEEPGREP_API_KEY="your-key"
+export DEEPGREP_FAST_BACKEND="openai"
+export DEEPGREP_FAST_MODEL="kr/claude-haiku-4.5"
+```
+
+Or add to `.claude/settings.json`:
+```json
+{
+  "mcpServers": {
+    "deepgrep": {
+      "command": "npx",
+      "args": ["-y", "deepgrep"],
+      "env": {
+        "DEEPGREP_API_KEY": "your-key",
+        "DEEPGREP_FAST_BACKEND": "openai",
+        "DEEPGREP_FAST_MODEL": "kr/claude-haiku-4.5"
+      }
+    }
+  }
+}
+```
+
+#### Cursor
+
+Settings → Features → MCP Servers → Add:
+- Command: `npx -y deepgrep`
+- Env: `DEEPGREP_API_KEY=your-key`, `DEEPGREP_FAST_BACKEND=openai`, `DEEPGREP_FAST_MODEL=kr/claude-haiku-4.5`
+
+Or in `.cursor/mcp.json`:
+```json
+{
+  "mcpServers": {
+    "deepgrep": {
+      "command": "npx",
+      "args": ["-y", "deepgrep"],
+      "env": {
+        "DEEPGREP_API_KEY": "your-key",
+        "DEEPGREP_FAST_BACKEND": "openai",
+        "DEEPGREP_FAST_MODEL": "kr/claude-haiku-4.5"
+      }
+    }
+  }
+}
+```
+
+#### Windsurf
+
+Add to `~/.codeium/windsurf/mcp_config.json`:
+```json
+{
+  "mcpServers": {
+    "deepgrep": {
+      "command": "npx",
+      "args": ["-y", "deepgrep"],
+      "env": {
+        "DEEPGREP_API_KEY": "your-key",
+        "DEEPGREP_FAST_BACKEND": "openai",
+        "DEEPGREP_FAST_MODEL": "kr/claude-haiku-4.5"
+      }
+    }
+  }
+}
+```
+
+#### Codex CLI (OpenAI)
+
+Add to `~/.codex/config.json` or `codex.json` in project root:
+```json
+{
+  "mcpServers": {
+    "deepgrep": {
+      "command": "npx",
+      "args": ["-y", "deepgrep"],
+      "env": {
+        "DEEPGREP_API_KEY": "your-key",
+        "DEEPGREP_FAST_BACKEND": "openai",
+        "DEEPGREP_FAST_MODEL": "kr/claude-haiku-4.5"
+      }
+    }
+  }
+}
+```
+
+#### VS Code + Copilot (GitHub Copilot MCP)
+
+Add to `.vscode/mcp.json`:
+```json
+{
+  "servers": {
+    "deepgrep": {
+      "command": "npx",
+      "args": ["-y", "deepgrep"],
+      "env": {
+        "DEEPGREP_API_KEY": "your-key",
+        "DEEPGREP_FAST_BACKEND": "openai",
+        "DEEPGREP_FAST_MODEL": "kr/claude-haiku-4.5"
+      }
+    }
+  }
+}
+```
+
+### Where to Put Steering/Rules (Agent Instructions)
+
+Each ADE has its own file for "always-on" agent instructions. Put your deepgrep usage rules here so the agent knows when to use `deepgrep_search` vs `deepgrep_deep` vs native grep:
+
+| ADE | Steering/Rules file | Scope | Notes |
+|-----|---------------------|-------|-------|
+| **Kiro** | `.kiro/steering/*.md` | Global or per-workspace | Supports `always`, `fileMatch`, `manual` inclusion modes |
+| **Claude Code** | `CLAUDE.md` (project root) | Per-project | Also supports `.claude/CLAUDE.md` for subfolders |
+| **Cursor** | `.cursor/rules/*.mdc` | Per-project | MDC format, supports `globs` for conditional rules |
+| **Windsurf** | `.windsurfrules` (project root) | Per-project | Single file, always loaded |
+| **Codex CLI** | `AGENTS.md` or `codex.md` (root) | Per-project | Auto-read on startup |
+| **VS Code Copilot** | `.github/copilot-instructions.md` | Per-repo | Auto-injected into Copilot Chat |
+| **Aider** | `.aider.conf.yml` + conventions | Per-project | Config-based |
+| **Cline/Roo** | `.clinerules` (project root) | Per-project | Single file, always loaded |
+
+### Example Steering Content (copy-paste into your ADE's rules file)
+
+```markdown
+# Code Search Strategy
+
+## When to use deepgrep
+
+- **`deepgrep_search`** (fast, free): Simple queries, 1-2 questions. "Where is X?", "Find the auth logic".
+- **`deepgrep_deep`** (slow, accurate): Complex multi-hop queries (3+ parts), architecture understanding, cross-layer tracing.
+- **`grep_search`** (native): When you already know the exact function/variable name.
+
+## Rules
+- For natural language code search, prefer `deepgrep_search` over native grep.
+- If `deepgrep_search` returns incomplete results or wrong direction, escalate to `deepgrep_deep`.
+- Always add `exclude_paths: ["node_modules", "dist", ".git", "build", ".next"]` for JS/TS projects.
+- Write queries in English with code terms for best results on fast mode.
+```

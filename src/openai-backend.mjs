@@ -4,7 +4,7 @@
  * Allows using any OpenAI-compatible API (9router, Anthropic via proxy, etc.)
  * instead of Windsurf's proprietary protobuf protocol.
  *
- * Env vars:
+ * Env vars (defaults, can be overridden per-call via opts):
  *   DEEPGREP_API_URL    — API endpoint (default: https://router.chainlens.net/v1)
  *   DEEPGREP_API_KEY    — API key for deep/fast mode
  *   DEEPGREP_MODEL      — Model ID (default: deep-search)
@@ -131,22 +131,29 @@ function _parseRetryDelayMs(text) {
   return null;
 }
 
-function _doFetch(url, body, timeoutMs) {
+function _doFetch(url, body, timeoutMs, apiKey) {
   return fetch(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "Authorization": `Bearer ${_getOpenAIApiKey()}`,
+      "Authorization": `Bearer ${apiKey}`,
     },
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(timeoutMs),
   });
 }
 
-async function _callOpenAI(messages, tools, timeoutMs = 60000, forceAnswer = false) {
-  const url = `${_getOpenAIBaseUrl()}/chat/completions`;
+/**
+ * @param {Object} callConfig - { baseUrl, apiKey, model } — resolved per-call config
+ */
+async function _callOpenAI(messages, tools, timeoutMs = 60000, forceAnswer = false, callConfig = {}) {
+  const baseUrl = callConfig.baseUrl || _getOpenAIBaseUrl();
+  const apiKey = callConfig.apiKey || _getOpenAIApiKey();
+  const model = callConfig.model || _getOpenAIModel();
+
+  const url = `${baseUrl}/chat/completions`;
   const body = {
-    model: _getOpenAIModel(),
+    model,
     messages,
     tools,
     tool_choice: forceAnswer
@@ -163,7 +170,7 @@ async function _callOpenAI(messages, tools, timeoutMs = 60000, forceAnswer = fal
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     let resp;
     try {
-      resp = await _doFetch(url, body, timeoutMs);
+      resp = await _doFetch(url, body, timeoutMs, apiKey);
     } catch (e) {
       // Network/timeout — retry with linear backoff
       lastErr = e;
@@ -219,7 +226,8 @@ async function _callOpenAI(messages, tools, timeoutMs = 60000, forceAnswer = fal
 
 /**
  * Execute search using OpenAI-compatible backend.
- * Same interface as the Windsurf `search()` function.
+ * Accepts optional per-call config (model/baseUrl/apiKey) to avoid process.env mutation.
+ * Falls back to env vars if opts not provided.
  */
 export async function searchOpenAI({
   query,
@@ -231,9 +239,21 @@ export async function searchOpenAI({
   timeoutMs = 60000,
   excludePaths = [],
   onProgress = null,
+  // Per-call config — avoids process.env mutation race conditions
+  model: optsModel = null,
+  baseUrl: optsBaseUrl = null,
+  apiKey: optsApiKey = null,
 }) {
   const log = (msg) => onProgress?.(msg);
   projectRoot = resolve(projectRoot);
+
+  // Resolve config once at call time — no env mutation
+  const callConfig = {
+    model: optsModel || _getOpenAIModel(),
+    baseUrl: optsBaseUrl || _getOpenAIBaseUrl(),
+    apiKey: optsApiKey || _getOpenAIApiKey(),
+  };
+  const resolvedModel = callConfig.model;
 
   const executor = new ToolExecutor(projectRoot);
   const tools = _buildOpenAITools(maxCommands);
@@ -243,14 +263,14 @@ export async function searchOpenAI({
 
   // Cache check (mtimeHash detects file CONTENT changes the tree string misses)
   const mtimeHash = computeMtimeHash(projectRoot, excludePaths);
-  const cacheKey = buildCacheKey({ query, model: _getOpenAIModel(), maxTurns, maxResults, treeDepth, repoMapHash: repoTree, mtimeHash, excludePaths });
+  const cacheKey = buildCacheKey({ query, model: resolvedModel, maxTurns, maxResults, treeDepth, repoMapHash: repoTree, mtimeHash, excludePaths });
   const cached = getCachedResult(cacheKey);
   if (cached) {
     log?.("[openai] Cache hit");
     return { ...cached, _meta: { ...cached._meta, cache_hit: true } };
   }
 
-  log?.(`[openai] Repo map: tree -L ${actualDepth} (${(treeSizeBytes / 1024).toFixed(1)}KB), model=${_getOpenAIModel()}`);
+  log?.(`[openai] Repo map: tree -L ${actualDepth} (${(treeSizeBytes / 1024).toFixed(1)}KB), model=${resolvedModel}`);
 
   const userContent = `Problem Statement: ${query}\n\nRepo Map (tree -L ${actualDepth} /codebase):\n\`\`\`text\n${repoTree}\n\`\`\``;
 
@@ -275,18 +295,18 @@ export async function searchOpenAI({
 
     let choice;
     try {
-      choice = await _callOpenAI(messages, tools, timeoutMs, forceAnswer);
+      choice = await _callOpenAI(messages, tools, timeoutMs, forceAnswer, callConfig);
     } catch (e) {
       // _callOpenAI already handles 429/network retries with backoff internally.
       return {
         files: [],
         error: `OpenAI backend error: ${e.message}`,
-        _meta: { treeDepth: actualDepth, treeSizeKB: +(treeSizeBytes / 1024).toFixed(1), fellBack, projectRoot, backend: "openai", model: _getOpenAIModel() },
+        _meta: { treeDepth: actualDepth, treeSizeKB: +(treeSizeBytes / 1024).toFixed(1), fellBack, projectRoot, backend: "openai", model: resolvedModel },
       };
     }
 
     if (!choice) {
-      return { files: [], error: "No response from OpenAI backend", _meta: { backend: "openai", model: _getOpenAIModel() } };
+      return { files: [], error: "No response from OpenAI backend", _meta: { backend: "openai", model: resolvedModel } };
     }
 
     const msg = choice.message;
@@ -310,8 +330,11 @@ export async function searchOpenAI({
           log?.("[openai] Received final answer");
           const result = _parseAnswer(answerXml, projectRoot);
           result.rg_patterns = [...new Set(executor.collectedRgPatterns)];
-          result._meta = { treeDepth: actualDepth, treeSizeKB: +(treeSizeBytes / 1024).toFixed(1), fellBack, backend: "openai", model: _getOpenAIModel(), cache_hit: false };
-          setCachedResult(cacheKey, result);
+          result._meta = { treeDepth: actualDepth, treeSizeKB: +(treeSizeBytes / 1024).toFixed(1), fellBack, backend: "openai", model: resolvedModel, cache_hit: false };
+          // Only cache non-empty results (AC#3: don't cache empty to preserve escalation)
+          if (result.files?.length > 0) {
+            setCachedResult(cacheKey, result);
+          }
           return result;
         }
 
@@ -335,8 +358,10 @@ export async function searchOpenAI({
         log?.("[openai] Received inline answer");
         const result = _parseAnswer(content, projectRoot);
         result.rg_patterns = [...new Set(executor.collectedRgPatterns)];
-        result._meta = { treeDepth: actualDepth, treeSizeKB: +(treeSizeBytes / 1024).toFixed(1), fellBack, backend: "openai", model: _getOpenAIModel(), cache_hit: false };
-        setCachedResult(cacheKey, result);
+        result._meta = { treeDepth: actualDepth, treeSizeKB: +(treeSizeBytes / 1024).toFixed(1), fellBack, backend: "openai", model: resolvedModel, cache_hit: false };
+        if (result.files?.length > 0) {
+          setCachedResult(cacheKey, result);
+        }
         return result;
       }
 
@@ -349,7 +374,7 @@ export async function searchOpenAI({
     files: [],
     error: "Max turns reached without answer (OpenAI backend)",
     rg_patterns: [...new Set(executor.collectedRgPatterns)],
-    _meta: { treeDepth: actualDepth, treeSizeKB: +(treeSizeBytes / 1024).toFixed(1), fellBack, projectRoot, backend: "openai", model: _getOpenAIModel() },
+    _meta: { treeDepth: actualDepth, treeSizeKB: +(treeSizeBytes / 1024).toFixed(1), fellBack, projectRoot, backend: "openai", model: resolvedModel },
   };
 }
 

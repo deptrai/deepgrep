@@ -24,6 +24,8 @@ import { z } from "zod";
 import { searchWithContent, extractKeyInfo } from "./core.mjs";
 import { readSnippets } from "./snippets.mjs";
 import { getBackend } from "./backends/index.mjs";
+import { shouldEscalate } from "./escalate.mjs";
+import { friendlyError } from "./shared.mjs";
 
 /**
  * Parse an integer env var with optional clamping.
@@ -83,8 +85,16 @@ const server = new McpServer({
 function _formatResult(result, maxTurns, maxResults, maxCommands, timeoutMs, excludePaths, includeSnippets = false) {
   if (result.error) {
     const meta = result._meta || {};
-    let errMsg = `Error: ${result.error}`;
-    if (meta.backend) errMsg += ` [backend=${meta.backend}, model=${meta.model}]`;
+    const model = meta.model || "unknown";
+    // Build a fake error object to get friendly message
+    const fakeErr = { message: result.error, status: null };
+    if (/\b429\b/.test(result.error)) fakeErr.status = 429;
+    else if (/\b403\b/.test(result.error)) fakeErr.status = 403;
+    else if (/\b401\b/.test(result.error)) fakeErr.status = 401;
+    const isFriendly = fakeErr.status || result.error.toLowerCase().includes("rate limit") || result.error.toLowerCase().includes("not accessible");
+    let errMsg = isFriendly ? friendlyError(fakeErr, model) : `Error: ${result.error}`;
+    // Preserve backend/model diagnostic for generic (non-friendly) errors
+    if (!isFriendly && meta.backend) errMsg += ` [backend=${meta.backend}, model=${meta.model}]`;
     if (meta.treeDepth != null) errMsg += `\n[diagnostic] tree_depth=${meta.treeDepth}, tree_size=${meta.treeSizeKB}KB`;
     return errMsg;
   }
@@ -219,8 +229,15 @@ server.tool(
         "If true, include actual code snippets for each file's line ranges in the output. " +
         "Default false (file paths + ranges only)."
       ),
+    auto_escalate: z
+      .boolean()
+      .default(true)
+      .describe(
+        "If true (default), automatically use deep mode for complex multi-hop queries or when quick returns 0 results. " +
+        "Set to false to always use quick mode regardless of query complexity."
+      ),
   },
-  async ({ query, project_path, tree_depth, max_turns, max_results, exclude_paths, include_snippets }) => {
+  async ({ query, project_path, tree_depth, max_turns, max_results, exclude_paths, include_snippets, auto_escalate }) => {
     let projectPath = project_path || process.cwd();
 
     try {
@@ -232,22 +249,64 @@ server.tool(
       return { content: [{ type: "text", text: `Error: project path does not exist: ${projectPath}` }] };
     }
 
+    // Deep config for escalation calls
+    const deepOpts = {
+      model: DEEP_MODEL, baseUrl: DEEP_BASE_URL, apiKey: DEEP_API_KEY,
+    };
+
+    // Evaluate escalation heuristic ONCE (local, ~0ms). refineHint applies even
+    // when DEEP_API_KEY is unset (so the non-English tip is still surfaced).
+    const { escalate, refineHint } = auto_escalate
+      ? shouldEscalate(query)
+      : { escalate: false, refineHint: null };
+
+    // Pre-escalate complex queries to deep mode before running quick
+    if (auto_escalate && DEEP_API_KEY && escalate) {
+      const backend = getBackend("openai");
+      const result = await backend.search({
+        query, projectRoot: projectPath, maxTurns: 3,
+        maxCommands: MAX_COMMANDS, maxResults: max_results,
+        treeDepth: tree_depth, timeoutMs: 90000,
+        excludePaths: exclude_paths.length ? exclude_paths : ["node_modules", "dist", ".git", "build", ".next"],
+        ...deepOpts,
+      });
+      let text = _formatResult(result, 3, max_results, MAX_COMMANDS, 90000, exclude_paths, include_snippets);
+      text += `\n[escalated to deep mode: complex query]`;
+      if (refineHint) text += `\n${refineHint}`;
+      return { content: [{ type: "text", text }] };
+    }
+
     try {
       let text;
+      const refineHintForOutput = refineHint;
+
       if (FAST_BACKEND === "openai") {
-        // Use OpenAI-compatible backend for fast mode (e.g. Haiku 4.5)
-        const prevModel = process.env.DEEPGREP_MODEL;
-        if (FAST_MODEL) process.env.DEEPGREP_MODEL = FAST_MODEL;
+        // Use OpenAI-compatible backend for fast mode — pass config via opts (no env mutation)
         const backend = getBackend("openai");
         const result = await backend.search({
           query, projectRoot: projectPath, maxTurns: max_turns,
           maxCommands: MAX_COMMANDS, maxResults: max_results,
           treeDepth: tree_depth, timeoutMs: TIMEOUT_MS + 30000,
           excludePaths: exclude_paths,
+          model: FAST_MODEL || DEEP_MODEL,
+          baseUrl: DEEP_BASE_URL,
+          apiKey: DEEP_API_KEY,
         });
-        if (prevModel !== undefined) process.env.DEEPGREP_MODEL = prevModel;
-        else delete process.env.DEEPGREP_MODEL;
         text = _formatResult(result, max_turns, max_results, MAX_COMMANDS, TIMEOUT_MS, exclude_paths);
+
+        // Auto-escalate on empty results
+        if (auto_escalate && DEEP_API_KEY && result.files?.length === 0 && !result.error) {
+          const deepBackend = getBackend("openai");
+          const deepResult = await deepBackend.search({
+            query, projectRoot: projectPath, maxTurns: 3,
+            maxCommands: MAX_COMMANDS, maxResults: max_results,
+            treeDepth: tree_depth, timeoutMs: 90000,
+            excludePaths: exclude_paths.length ? exclude_paths : ["node_modules", "dist", ".git", "build", ".next"],
+            ...deepOpts,
+          });
+          text = _formatResult(deepResult, 3, max_results, MAX_COMMANDS, 90000, exclude_paths, include_snippets);
+          text += "\n[escalated to deep mode: empty result]";
+        }
       } else {
         // Default: Windsurf/SWE-1.6 (free, fast)
         text = await searchWithContent({
@@ -256,7 +315,25 @@ server.tool(
           treeDepth: tree_depth, timeoutMs: TIMEOUT_MS,
           excludePaths: exclude_paths, includeSnippets: include_snippets,
         });
+
+        // Auto-escalate on empty results (windsurf → deep).
+        // Covers both empty-output variants from searchWithContent.
+        const isEmpty = text.startsWith("No relevant files found") || text.startsWith("No files found");
+        if (auto_escalate && DEEP_API_KEY && isEmpty) {
+          const deepBackend = getBackend("openai");
+          const deepResult = await deepBackend.search({
+            query, projectRoot: projectPath, maxTurns: 3,
+            maxCommands: MAX_COMMANDS, maxResults: max_results,
+            treeDepth: tree_depth, timeoutMs: 90000,
+            excludePaths: exclude_paths.length ? exclude_paths : ["node_modules", "dist", ".git", "build", ".next"],
+            ...deepOpts,
+          });
+          text = _formatResult(deepResult, 3, max_results, MAX_COMMANDS, 90000, exclude_paths, include_snippets);
+          text += "\n[escalated to deep mode: empty result]";
+        }
       }
+
+      if (refineHintForOutput) text += `\n${refineHintForOutput}`;
       return { content: [{ type: "text", text }] };
     } catch (e) {
       const code = e.code || "UNKNOWN";
@@ -342,14 +419,7 @@ server.tool(
       return { content: [{ type: "text", text: `Error: project path does not exist: ${projectPath}` }] };
     }
 
-    // Temporarily set env for OpenAI backend
-    const prevBase = process.env.FC_OPENAI_BASE_URL;
-    const prevKey = process.env.FC_OPENAI_API_KEY;
-    const prevModel = process.env.FC_OPENAI_MODEL;
-    process.env.FC_OPENAI_BASE_URL = DEEP_BASE_URL;
-    process.env.FC_OPENAI_API_KEY = DEEP_API_KEY;
-    process.env.FC_OPENAI_MODEL = DEEP_MODEL;
-
+    // Use OpenAI backend with per-call config via opts — no process.env mutation
     try {
       const backend = getBackend("openai");
       const result = await backend.search({
@@ -361,20 +431,33 @@ server.tool(
         treeDepth: tree_depth,
         timeoutMs: 90000,
         excludePaths: exclude_paths.length ? exclude_paths : ["node_modules", "dist", ".git", "build", ".next"],
+        model: DEEP_MODEL,
+        baseUrl: DEEP_BASE_URL,
+        apiKey: DEEP_API_KEY,
       });
       return { content: [{ type: "text", text: _formatResult(result, 3, max_results, MAX_COMMANDS, 90000, exclude_paths, include_snippets) }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error [deep]: ${e.message}` }] };
-    } finally {
-      // Restore env
-      if (prevBase !== undefined) process.env.FC_OPENAI_BASE_URL = prevBase; else delete process.env.FC_OPENAI_BASE_URL;
-      if (prevKey !== undefined) process.env.FC_OPENAI_API_KEY = prevKey; else delete process.env.FC_OPENAI_API_KEY;
-      if (prevModel !== undefined) process.env.FC_OPENAI_MODEL = prevModel; else delete process.env.FC_OPENAI_MODEL;
     }
   }
 );
 
 // ─── Note: extract_windsurf_key is internal only (not exposed as a tool) ───
+
+// ─── Tool: deepgrep_status ─────────────────────────────────
+
+server.tool(
+  "deepgrep_status",
+  "Check deepgrep configuration and model availability. " +
+  "Returns API key validity, endpoint, model status, and Devin Desktop detection. " +
+  "Use this to verify your setup or debug configuration issues.",
+  {},
+  async () => {
+    const { checkHealth, formatHealthReport } = await import("./health.mjs");
+    const report = await checkHealth();
+    return { content: [{ type: "text", text: formatHealthReport(report) }] };
+  }
+);
 
 // ─── Start ─────────────────────────────────────────────────
 

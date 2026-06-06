@@ -815,7 +815,10 @@ export async function search({
       const result = _parseAnswer(answerXml, projectRoot);
       result.rg_patterns = [...new Set(executor.collectedRgPatterns)];
       result._meta = { treeDepth: actualDepth, treeSizeKB: +(treeSizeBytes / 1024).toFixed(1), fellBack, cache_hit: false };
-      setCachedResult(cacheKey, result);
+      // AC#3: skip caching empty results so auto-escalation can retry next time
+      if (result.files?.length > 0) {
+        setCachedResult(cacheKey, result);
+      }
       return result;
     }
 
