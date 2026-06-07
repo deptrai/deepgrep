@@ -88,13 +88,14 @@ function _formatResult(result, maxTurns, maxResults, maxCommands, timeoutMs, exc
     const model = meta.model || "unknown";
     // Build a fake error object to get friendly message
     const fakeErr = { message: result.error, status: null };
-    if (/\b429\b/.test(result.error)) fakeErr.status = 429;
-    else if (/\b403\b/.test(result.error)) fakeErr.status = 403;
-    else if (/\b401\b/.test(result.error)) fakeErr.status = 401;
+    // Match HTTP status codes but not ports/line-numbers/versions (":429", "4290", "1.4.29").
+    if (/(?<![\d.:])429(?![\d.:])/.test(result.error)) fakeErr.status = 429;
+    else if (/(?<![\d.:])403(?![\d.:])/.test(result.error)) fakeErr.status = 403;
+    else if (/(?<![\d.:])401(?![\d.:])/.test(result.error)) fakeErr.status = 401;
     const isFriendly = fakeErr.status || result.error.toLowerCase().includes("rate limit") || result.error.toLowerCase().includes("not accessible");
     let errMsg = isFriendly ? friendlyError(fakeErr, model) : `Error: ${result.error}`;
     // Preserve backend/model diagnostic for generic (non-friendly) errors
-    if (!isFriendly && meta.backend) errMsg += ` [backend=${meta.backend}, model=${meta.model}]`;
+    if (!isFriendly && meta.backend) errMsg += ` [backend=${meta.backend}, model=${model}]`;
     if (meta.treeDepth != null) errMsg += `\n[diagnostic] tree_depth=${meta.treeDepth}, tree_size=${meta.treeSizeKB}KB`;
     return errMsg;
   }
@@ -256,9 +257,9 @@ server.tool(
 
     // Evaluate escalation heuristic ONCE (local, ~0ms). refineHint applies even
     // when DEEP_API_KEY is unset (so the non-English tip is still surfaced).
-    const { escalate, refineHint } = auto_escalate
+    const { escalate, reason: escalateReason, refineHint } = auto_escalate
       ? shouldEscalate(query)
-      : { escalate: false, refineHint: null };
+      : { escalate: false, reason: null, refineHint: null };
 
     // Pre-escalate complex queries to deep mode before running quick
     if (auto_escalate && DEEP_API_KEY && escalate) {
@@ -271,7 +272,7 @@ server.tool(
         ...deepOpts,
       });
       let text = _formatResult(result, 3, max_results, MAX_COMMANDS, 90000, exclude_paths, include_snippets);
-      text += `\n[escalated to deep mode: complex query]`;
+      text += `\n[escalated to deep mode: ${escalateReason}]`;
       if (refineHint) text += `\n${refineHint}`;
       return { content: [{ type: "text", text }] };
     }
@@ -453,9 +454,13 @@ server.tool(
   "Use this to verify your setup or debug configuration issues.",
   {},
   async () => {
-    const { checkHealth, formatHealthReport } = await import("./health.mjs");
-    const report = await checkHealth();
-    return { content: [{ type: "text", text: formatHealthReport(report) }] };
+    try {
+      const { checkHealth, formatHealthReport } = await import("./health.mjs");
+      const report = await checkHealth();
+      return { content: [{ type: "text", text: formatHealthReport(report) }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: `deepgrep status\n\n❌ Health check failed: ${e?.message || e}` }] };
+    }
   }
 );
 

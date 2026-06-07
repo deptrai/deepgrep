@@ -7,11 +7,14 @@
  */
 
 // Multi-hop keywords that strongly indicate cross-file tracing.
-// Entries containing ".*" are treated as regex (word-bounded to avoid
-// over-matching substrings like "transformation topology" for "from.*to").
+// Entries containing ".*" are treated as regex. Word boundaries (\b) keep a
+// multi-word pattern from firing inside unrelated words — e.g. unbounded
+// "from.*to" matches "get config from the token" ("to" inside "token"),
+// whereas "\bfrom\b.*\bto\b" requires standalone words. Apply \b consistently
+// to every ".*" entry. (Plain-string entries below still match as substrings.)
 const MULTI_HOP_KEYWORDS = [
   "trace", "flow", "across", "through", "pipeline", "end-to-end", "end to end",
-  "data flow", "call chain", "\\bfrom\\b.*\\bto\\b", "how does.*work", "walk me through",
+  "data flow", "call chain", "\\bfrom\\b.*\\bto\\b", "\\bhow\\b does.*\\bwork\\b", "walk me through",
   "full path", "all the way", "step by step", "entire flow",
 ];
 
