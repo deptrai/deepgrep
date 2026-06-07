@@ -52,7 +52,9 @@ deepgrep "trace the auth flow" → 4 files, done.
 
 → [deepgrep.chainlens.net](https://deepgrep.chainlens.net)
 
-### 2. Add to your MCP client#### Kiro
+### 2. Add to your MCP client
+
+#### Kiro
 
 Add to `~/.kiro/settings/mcp.json`:
 
@@ -105,10 +107,15 @@ Settings → MCP → Add server → command: `npx -y deepgrep`, env: `DEEPGREP_A
 
 ### 3. Done! Ask your code anything.
 
-### Option B: Standalone binary (no Node required)
+### Option B: Standalone binary (experimental — targeted for v1.2)
+
+> ⚠️ **Experimental — not yet supported.** The `bun --compile` binary does not
+> currently embed the native `rg` (ripgrep) binary or the `sql.js` WASM, so a
+> downloaded binary fails to run searches on machines without the build-time
+> `node_modules`. Use **Option A (npx)** for now — the binary is tracked for v1.2.
 
 ```bash
-# Download binary (macOS example):
+# (v1.2) Download binary (macOS example):
 curl -L https://github.com/deptrai/deepgrep/releases/latest/download/deepgrep-macos -o deepgrep
 chmod +x deepgrep
 ```
@@ -127,27 +134,32 @@ Then configure your MCP client with:
 
 ## MCP Tools
 
-deepgrep exposes three tools:
+deepgrep exposes three tools, all using your `DEEPGREP_API_KEY` — one key, all modes.
 
-### `deepgrep_search` — Fast mode (quick)
+| Tool | Speed | Best for |
+|------|-------|----------|
+| `deepgrep_search` | ~3-5s | Quick lookups, simple queries |
+| `deepgrep_deep` | ~20-40s | Complex tracing, architecture, multi-hop |
+| `deepgrep_status` | instant | Health check, config verification |
 
-### `deepgrep_deep` — Deep mode (thorough)
+### `deepgrep_search` — Fast mode
 
-| Mode | Tool | Speed | Best for |
-|------|------|-------|----------|
-| **Fast** | `deepgrep_search` | ~3-5s | Quick lookups, simple queries |
-| **Deep** | `deepgrep_deep` | ~20-30s | Complex tracing, architecture, multi-hop |
+Quick semantic search for everyday lookups. Supports `auto_escalate=true` (default): automatically switches to deep mode for complex queries or empty results.
 
-`deepgrep_search` supports `auto_escalate=true` (default): automatically switches to deep mode for complex queries or empty results.
+### `deepgrep_deep` — Deep mode
+
+Slower, multi-hop reasoning for complex tracing, architecture, and cross-file questions. Requires `DEEPGREP_API_KEY`.
 
 ### `deepgrep_status` — Health check
 
 No parameters. Returns:
 - ✅/❌ API key validity
-- ✅/❌/⚠️ Model availability (rate limited, unauthorized, etc.)
-- ✅/⚠️ Devin Desktop detection
+- ✅/❌ Endpoint reachability
+- ✅/⚠️ Model availability (rate limited, unauthorized, etc.)
+- ✅/⚠️/ℹ️ Devin Desktop detection
 - Current configuration summary
 
+Example output:
 ```
 deepgrep status
 
@@ -160,8 +172,6 @@ Config: fast_backend=windsurf, deep_model=deep-search
 ```
 
 Use this to verify your setup or debug configuration issues.
-
-Both use your `DEEPGREP_API_KEY`. One key, both modes.
 
 ### Fast mode examples
 
@@ -225,19 +235,18 @@ deepgrep works with **any OpenAI-compatible API**:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DEEPGREP_API_KEY` | — | API key ([get yours](https://deepgrep.chainlens.net)) |
+| `DEEPGREP_API_KEY` | — | API key for deep mode ([get yours](https://deepgrep.chainlens.net)) |
 | `DEEPGREP_API_URL` | `https://router.chainlens.net/v1` | API endpoint for deep mode |
 | `DEEPGREP_MODEL` | `deep-search` | Model for deep search |
-| `DEEPGREP_FAST_BACKEND` | `windsurf` | Fast mode backend: `openai` or `windsurf` |
-| `DEEPGREP_FAST_MODEL` | — | Model for fast mode (when `FAST_BACKEND=openai`) |
+| `DEEPGREP_FAST_BACKEND` | `windsurf` | Fast mode backend: `openai` or `windsurf` (auto-detect Devin Desktop) |
+| `DEEPGREP_FAST_MODEL` | — | Model for fast mode (required when `DEEPGREP_FAST_BACKEND=openai`) |
 | `DEEPGREP_CACHE_DISABLED` | — | Set `1` to disable result cache (legacy: `FC_CACHE_DISABLED`) |
-| `DEEPGREP_CACHE_TTL_MS` | `300000` (5min) | Cache TTL in ms (legacy: `FC_CACHE_TTL_MS`) |
-| `DEEPGREP_CACHE_MAX_ENTRIES` | `200` | Max cached entries before eviction (legacy: `FC_CACHE_MAX_ENTRIES`) |
-| `DEEPGREP_NO_TELEMETRY` | — | Set `1` to disable anonymous stats |
+| `DEEPGREP_CACHE_TTL_MS` | `300000` (5 min) | Cache TTL in ms (legacy: `FC_CACHE_TTL_MS`) |
+| `DEEPGREP_CACHE_MAX_ENTRIES` | `200` | Max cached entries before LRU eviction (legacy: `FC_CACHE_MAX_ENTRIES`) |
 
 ## Parameters
 
-Both tools accept:
+Both `deepgrep_search` and `deepgrep_deep` accept:
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
@@ -245,11 +254,15 @@ Both tools accept:
 | `project_path` | cwd | Absolute path to project root |
 | `tree_depth` | 3 | Directory tree depth (1-6). Lower for huge repos. |
 | `max_results` | 10 | Max files to return (1-30) |
-| `exclude_paths` | [] | Patterns to exclude (e.g. `["node_modules", "dist"]`) |
-| `include_snippets` | false | Include actual code content in results |
-| `auto_escalate` | true | Auto-switch to deep mode for complex queries or empty results (deepgrep_search only) |
+| `exclude_paths` | `[]` | Patterns to exclude (e.g. `["node_modules", "dist"]`) |
+| `include_snippets` | `false` | Include actual code content in results |
 
-`deepgrep_search` also accepts `max_turns` (1-5, default 3).
+`deepgrep_search` also accepts:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `max_turns` | 3 | Search rounds (1-5). More = better results, slower. |
+| `auto_escalate` | `true` | Auto-switch to deep mode for complex queries or empty results |
 
 ## How It Works
 
@@ -290,7 +303,7 @@ Request → "deep-search" combo
 | **Combo (default)** | `deep-search` | Sonnet 4.6 → GPT-5.5 fallback |
 | Claude Sonnet 4.6 | `kr/claude-sonnet-4.6` | Fast, good accuracy |
 | Claude Haiku 4.5 | `kr/claude-haiku-4.5` | Cheapest, good for fast mode |
-| GPT-5.5 | `cx/gpt-5.5` | Most reliable |
+| GPT-5.5 | `cx/gpt-5.5` | Most reliable for complex queries |
 | Claude Opus 4.8 | `kr/claude-opus-4.8` | Most powerful |
 
 Override: `DEEPGREP_MODEL=kr/claude-sonnet-4.6`
@@ -309,6 +322,8 @@ List all models: `curl -H "Authorization: Bearer KEY" https://router.chainlens.n
 ## License
 
 MIT
+
+---
 
 ## Configuration for All ADEs (AI Development Environments)
 
@@ -389,9 +404,10 @@ Or in `.cursor/mcp.json`:
 }
 ```
 
-#### Windsurf
+#### Devin Desktop / Windsurf
 
-Add to `~/.codeium/windsurf/mcp_config.json`:
+Add to `~/Library/Application Support/Devin/User/globalStorage/mcp_config.json` (Devin Desktop) or `~/.codeium/windsurf/mcp_config.json` (Windsurf):
+
 ```json
 {
   "mcpServers": {
@@ -407,6 +423,8 @@ Add to `~/.codeium/windsurf/mcp_config.json`:
   }
 }
 ```
+
+> 💡 **Devin Desktop bonus:** deepgrep auto-detects your local Devin credentials for fast mode. Omit `DEEPGREP_FAST_BACKEND` and `DEEPGREP_FAST_MODEL` to use free SWE-1.6 automatically.
 
 #### Codex CLI (OpenAI)
 
@@ -455,7 +473,7 @@ Each ADE has its own file for "always-on" agent instructions. Put your deepgrep 
 | **Kiro** | `.kiro/steering/*.md` | Global or per-workspace | Supports `always`, `fileMatch`, `manual` inclusion modes |
 | **Claude Code** | `CLAUDE.md` (project root) | Per-project | Also supports `.claude/CLAUDE.md` for subfolders |
 | **Cursor** | `.cursor/rules/*.mdc` | Per-project | MDC format, supports `globs` for conditional rules |
-| **Windsurf** | `.windsurfrules` (project root) | Per-project | Single file, always loaded |
+| **Devin Desktop / Windsurf** | `.windsurfrules` (project root) | Per-project | Single file, always loaded |
 | **Codex CLI** | `AGENTS.md` or `codex.md` (root) | Per-project | Auto-read on startup |
 | **VS Code Copilot** | `.github/copilot-instructions.md` | Per-repo | Auto-injected into Copilot Chat |
 | **Aider** | `.aider.conf.yml` + conventions | Per-project | Config-based |
@@ -468,8 +486,8 @@ Each ADE has its own file for "always-on" agent instructions. Put your deepgrep 
 
 ## When to use deepgrep
 
-- **`deepgrep_search`** (fast, free): Simple queries, 1-2 questions. "Where is X?", "Find the auth logic".
-- **`deepgrep_deep`** (slow, accurate): Complex multi-hop queries (3+ parts), architecture understanding, cross-layer tracing.
+- **`deepgrep_search`** (fast, ~3-5s): Simple queries, 1-2 questions. "Where is X?", "Find the auth logic".
+- **`deepgrep_deep`** (thorough, ~20-40s): Complex multi-hop queries (3+ parts), architecture understanding, cross-layer tracing.
 - **`grep_search`** (native): When you already know the exact function/variable name.
 
 ## Rules
