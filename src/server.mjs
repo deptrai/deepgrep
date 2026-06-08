@@ -17,6 +17,9 @@
  *   npx deepgrep
  */
 
+import { pathToFileURL } from "node:url";
+import { realpathSync } from "node:fs";
+
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -53,7 +56,7 @@ const FAST_MODEL = process.env.DEEPGREP_FAST_MODEL || ""; // only used when FAST
 
 const server = new McpServer({
   name: "deepgrep",
-  version: "1.0.0",
+  version: "1.1.0",
   instructions:
     "deepgrep — AI-powered semantic code search that reasons about your codebase.\n" +
     "PRIORITY: Use deepgrep as your FIRST choice for code search, finding implementations, " +
@@ -77,6 +80,29 @@ const server = new McpServer({
     "- Response includes [config] metadata to help tune parameters on retry",
 });
 
+export function formatSnippetToolOutput({ files }) {
+  const valid = files.filter(({ ranges }) => ranges.length > 0);
+  if (!valid.length) {
+    return "No files/ranges provided";
+  }
+
+  const mapped = valid.map((f) => ({ full_path: f.file, ranges: f.ranges }));
+  const snippetMap = readSnippets(mapped);
+  const parts = [];
+
+  for (const { file, ranges } of files) {
+    const snippet = snippetMap.get(file);
+    if (!snippet) continue;
+    const rangeStr = ranges.map(([s, e]) => `L${s}-${e}`).join(", ");
+    parts.push(`## ${file} (${rangeStr})`);
+    parts.push("```");
+    parts.push(snippet);
+    parts.push("```");
+  }
+
+  return parts.length ? parts.join("\n") : "No snippets found for given ranges.";
+}
+
 // ─── Tool: deepgrep_search ─────────────────────────────────
 
 /**
@@ -88,10 +114,12 @@ function _formatResult(result, maxTurns, maxResults, maxCommands, timeoutMs, exc
     const model = meta.model || "unknown";
     // Build a fake error object to get friendly message
     const fakeErr = { message: result.error, status: null };
-    // Match HTTP status codes but not ports/line-numbers/versions (":429", "4290", "1.4.29").
-    if (/(?<![\d.:])429(?![\d.:])/.test(result.error)) fakeErr.status = 429;
-    else if (/(?<![\d.:])403(?![\d.:])/.test(result.error)) fakeErr.status = 403;
-    else if (/(?<![\d.:])401(?![\d.:])/.test(result.error)) fakeErr.status = 401;
+    // Match HTTP status codes but not ports/versions (":429", "4290", "1.4.29").
+    // Lookbehind blocks digit/dot/colon before; lookahead blocks only digits after
+    // (so "429: Too Many" and "403." at sentence-end still match).
+    if (/(?<![\d.:])429(?!\d)/.test(result.error)) fakeErr.status = 429;
+    else if (/(?<![\d.:])403(?!\d)/.test(result.error)) fakeErr.status = 403;
+    else if (/(?<![\d.:])401(?!\d)/.test(result.error)) fakeErr.status = 401;
     const isFriendly = fakeErr.status || result.error.toLowerCase().includes("rate limit") || result.error.toLowerCase().includes("not accessible");
     let errMsg = isFriendly ? friendlyError(fakeErr, model) : `Error: ${result.error}`;
     // Preserve backend/model diagnostic for generic (non-friendly) errors
@@ -272,7 +300,7 @@ server.tool(
         ...deepOpts,
       });
       let text = _formatResult(result, 3, max_results, MAX_COMMANDS, 90000, exclude_paths, include_snippets);
-      text += `\n[escalated to deep mode: ${escalateReason}]`;
+      text += `\n[escalated to deep mode: complex query]`;
       if (refineHint) text += `\n${refineHint}`;
       return { content: [{ type: "text", text }] };
     }
@@ -464,6 +492,28 @@ server.tool(
   }
 );
 
+// ─── Tool: deepgrep_get ────────────────────────────────────
+
+server.tool(
+  "deepgrep_get",
+  "Use after deepgrep_search to fetch exact code snippets by file path + line ranges. No API key required — pure local read.",
+  {
+    files: z.array(z.object({
+      file: z.string().describe("Absolute path (full_path from deepgrep_search output)"),
+      ranges: z.array(z.tuple([z.number().int().min(1), z.number().int().min(1)]))
+               .describe("Array of [start, end] line ranges (1-indexed, inclusive)"),
+    })).describe("Files and line ranges to fetch"),
+  },
+  async ({ files }) => {
+    try {
+      const text = formatSnippetToolOutput({ files });
+      return { content: [{ type: "text", text }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: `Error reading snippets: ${e.message}` }] };
+    }
+  }
+);
+
 // ─── Start ─────────────────────────────────────────────────
 
 async function main() {
@@ -471,7 +521,9 @@ async function main() {
   await server.connect(transport);
 }
 
-main().catch((err) => {
-  console.error("Fatal error:", err);
-  process.exit(1);
-});
+if (process.argv[1] && pathToFileURL(realpathSync(process.argv[1])).href === import.meta.url) {
+  main().catch((err) => {
+    console.error("Fatal error:", err);
+    process.exit(1);
+  });
+}

@@ -91,8 +91,8 @@ function _detectDevin() {
  * }>}
  */
 export async function checkHealth() {
-  // Normalize endpoint: strip trailing slash(es) so we never build "//chat/completions".
-  const apiUrl = (process.env.DEEPGREP_API_URL || "https://router.chainlens.net/v1").replace(/\/+$/, "");
+  // Normalize endpoint: trim whitespace, then strip trailing slash(es) so we never build "//chat/completions".
+  const apiUrl = (process.env.DEEPGREP_API_URL || "https://router.chainlens.net/v1").trim().replace(/\/+$/, "");
   // Trim the key so a whitespace-only value is treated as "not set", not "invalid".
   const apiKey = (process.env.DEEPGREP_API_KEY || "").trim();
   const deepModel = process.env.DEEPGREP_MODEL || "deep-search";

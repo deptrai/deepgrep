@@ -14,7 +14,7 @@
 // to every ".*" entry. (Plain-string entries below still match as substrings.)
 const MULTI_HOP_KEYWORDS = [
   "trace", "flow", "across", "through", "pipeline", "end-to-end", "end to end",
-  "data flow", "call chain", "\\bfrom\\b.*\\bto\\b", "\\bhow\\b does.*\\bwork\\b", "walk me through",
+  "data flow", "call chain", "\\bfrom\\b.*\\bto\\b", "\\bhow\\b does.*\\bwork(s|ing)?\\b", "walk me through",
   "full path", "all the way", "step by step", "entire flow",
 ];
 

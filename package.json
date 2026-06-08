@@ -1,6 +1,6 @@
 {
   "name": "deepgrep",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "AI code search that thinks — zero-index semantic search for any MCP client",
   "type": "module",
   "main": "src/server.mjs",
