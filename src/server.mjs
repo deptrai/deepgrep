@@ -24,7 +24,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 
-import { searchWithContent, extractKeyInfo } from "./core.mjs";
+import { search as windsurfSearch, searchWithContent, extractKeyInfo } from "./core.mjs";
 import { readSnippets } from "./snippets.mjs";
 import { getBackend } from "./backends/index.mjs";
 import { shouldEscalate } from "./escalate.mjs";
@@ -343,16 +343,34 @@ server.tool(
         }
       } else {
         // Default: Windsurf/SWE-1.6 (free, fast)
-        text = await searchWithContent({
-          query, projectRoot: projectPath, maxTurns: max_turns,
-          maxCommands: MAX_COMMANDS, maxResults: max_results,
-          treeDepth: tree_depth, timeoutMs: TIMEOUT_MS,
-          excludePaths: exclude_paths, includeSnippets: include_snippets,
-        });
+        if (output_format === "json") {
+          // JSON mode: use search() directly to get structured result
+          const wsResult = await windsurfSearch({
+            query, projectRoot: projectPath, maxTurns: max_turns,
+            maxCommands: MAX_COMMANDS, maxResults: max_results,
+            treeDepth: tree_depth, timeoutMs: TIMEOUT_MS,
+            excludePaths: exclude_paths,
+          });
+          text = serializeSearchResult(wsResult, { maxTurns: max_turns, maxResults: max_results, maxCommands: MAX_COMMANDS, timeoutMs: TIMEOUT_MS, excludePaths: exclude_paths, includeSnippets: include_snippets, mode: "quick" }, _formatResult, "json");
+          const wsEmpty = !wsResult.error && (!wsResult.files || wsResult.files.length === 0);
+          if (auto_escalate && DEEP_API_KEY && wsEmpty) {
+            const deepBackend = getBackend("openai");
+            const deepResult = await deepBackend.search({ query, projectRoot: projectPath, maxTurns: 3, maxCommands: MAX_COMMANDS, maxResults: max_results, treeDepth: tree_depth, timeoutMs: 90000, excludePaths: exclude_paths.length ? exclude_paths : ["node_modules", "dist", ".git", "build", ".next"], ...deepOpts });
+            text = serializeSearchResult(deepResult, { maxTurns: 3, maxResults: max_results, maxCommands: MAX_COMMANDS, timeoutMs: 90000, excludePaths: exclude_paths, includeSnippets: include_snippets, mode: "escalated" }, _formatResult, "json");
+            text = text.replace(/\}$/, `,"escalated_to_deep":true}`);
+          }
+        } else {
+          text = await searchWithContent({
+            query, projectRoot: projectPath, maxTurns: max_turns,
+            maxCommands: MAX_COMMANDS, maxResults: max_results,
+            treeDepth: tree_depth, timeoutMs: TIMEOUT_MS,
+            excludePaths: exclude_paths, includeSnippets: include_snippets,
+          });
+        }
 
-        // Auto-escalate on empty results (windsurf → deep).
+        // Auto-escalate on empty results (windsurf text mode → deep).
         // Covers both empty-output variants from searchWithContent.
-        const isEmpty = text.startsWith("No relevant files found") || text.startsWith("No files found");
+        const isEmpty = output_format === "json" ? false : (text.startsWith("No relevant files found") || text.startsWith("No files found"));
         if (auto_escalate && DEEP_API_KEY && isEmpty) {
           const deepBackend = getBackend("openai");
           const deepResult = await deepBackend.search({
