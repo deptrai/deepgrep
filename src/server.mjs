@@ -29,6 +29,7 @@ import { readSnippets } from "./snippets.mjs";
 import { getBackend } from "./backends/index.mjs";
 import { shouldEscalate } from "./escalate.mjs";
 import { friendlyError } from "./shared.mjs";
+import { serializeSearchResult, serializeSnippetResult } from "./contract.mjs";
 
 /**
  * Parse an integer env var with optional clamping.
@@ -108,7 +109,7 @@ export function formatSnippetToolOutput({ files }) {
 /**
  * Format search result object into text output.
  */
-function _formatResult(result, maxTurns, maxResults, maxCommands, timeoutMs, excludePaths, includeSnippets = false) {
+export function _formatResult(result, maxTurns, maxResults, maxCommands, timeoutMs, excludePaths, includeSnippets = false) {
   if (result.error) {
     const meta = result._meta || {};
     const model = meta.model || "unknown";
@@ -265,8 +266,12 @@ server.tool(
         "If true (default), automatically use deep mode for complex multi-hop queries or when quick returns 0 results. " +
         "Set to false to always use quick mode regardless of query complexity."
       ),
+    output_format: z
+      .enum(["text", "json"])
+      .default("text")
+      .describe("Output format. 'text' (default) for human-readable output; 'json' for stable machine-parseable ADR-8 contract."),
   },
-  async ({ query, project_path, tree_depth, max_turns, max_results, exclude_paths, include_snippets, auto_escalate }) => {
+  async ({ query, project_path, tree_depth, max_turns, max_results, exclude_paths, include_snippets, auto_escalate, output_format }) => {
     let projectPath = project_path || process.cwd();
 
     try {
@@ -299,7 +304,7 @@ server.tool(
         excludePaths: exclude_paths.length ? exclude_paths : ["node_modules", "dist", ".git", "build", ".next"],
         ...deepOpts,
       });
-      let text = _formatResult(result, 3, max_results, MAX_COMMANDS, 90000, exclude_paths, include_snippets);
+      let text = serializeSearchResult(result, { maxTurns: 3, maxResults: max_results, maxCommands: MAX_COMMANDS, timeoutMs: 90000, excludePaths: exclude_paths, includeSnippets: include_snippets, mode: "escalated" }, _formatResult, output_format);
       text += `\n[escalated to deep mode: complex query]`;
       if (refineHint) text += `\n${refineHint}`;
       return { content: [{ type: "text", text }] };
@@ -321,7 +326,7 @@ server.tool(
           baseUrl: DEEP_BASE_URL,
           apiKey: DEEP_API_KEY,
         });
-        text = _formatResult(result, max_turns, max_results, MAX_COMMANDS, TIMEOUT_MS, exclude_paths);
+        text = serializeSearchResult(result, { maxTurns: max_turns, maxResults: max_results, maxCommands: MAX_COMMANDS, timeoutMs: TIMEOUT_MS, excludePaths: exclude_paths, includeSnippets: include_snippets, mode: "quick" }, _formatResult, output_format);
 
         // Auto-escalate on empty results
         if (auto_escalate && DEEP_API_KEY && result.files?.length === 0 && !result.error) {
@@ -333,7 +338,7 @@ server.tool(
             excludePaths: exclude_paths.length ? exclude_paths : ["node_modules", "dist", ".git", "build", ".next"],
             ...deepOpts,
           });
-          text = _formatResult(deepResult, 3, max_results, MAX_COMMANDS, 90000, exclude_paths, include_snippets);
+          text = serializeSearchResult(deepResult, { maxTurns: 3, maxResults: max_results, maxCommands: MAX_COMMANDS, timeoutMs: 90000, excludePaths: exclude_paths, includeSnippets: include_snippets, mode: "escalated" }, _formatResult, output_format);
           text += "\n[escalated to deep mode: empty result]";
         }
       } else {
@@ -357,7 +362,7 @@ server.tool(
             excludePaths: exclude_paths.length ? exclude_paths : ["node_modules", "dist", ".git", "build", ".next"],
             ...deepOpts,
           });
-          text = _formatResult(deepResult, 3, max_results, MAX_COMMANDS, 90000, exclude_paths, include_snippets);
+          text = serializeSearchResult(deepResult, { maxTurns: 3, maxResults: max_results, maxCommands: MAX_COMMANDS, timeoutMs: 90000, excludePaths: exclude_paths, includeSnippets: include_snippets, mode: "escalated" }, _formatResult, output_format);
           text += "\n[escalated to deep mode: empty result]";
         }
       }
@@ -424,8 +429,12 @@ server.tool(
       .boolean()
       .default(false)
       .describe("If true, include code snippets for each file's line ranges."),
+    output_format: z
+      .enum(["text", "json"])
+      .default("text")
+      .describe("Output format. 'text' (default) for human-readable; 'json' for stable ADR-8 contract."),
   },
-  async ({ query, project_path, tree_depth, max_results, exclude_paths, include_snippets }) => {
+  async ({ query, project_path, tree_depth, max_results, exclude_paths, include_snippets, output_format }) => {
     // Gating: require DEEPGREP_API_KEY
     if (!DEEP_API_KEY) {
       const gatingMessage =
@@ -464,7 +473,7 @@ server.tool(
         baseUrl: DEEP_BASE_URL,
         apiKey: DEEP_API_KEY,
       });
-      return { content: [{ type: "text", text: _formatResult(result, 3, max_results, MAX_COMMANDS, 90000, exclude_paths, include_snippets) }] };
+      return { content: [{ type: "text", text: serializeSearchResult(result, { maxTurns: 3, maxResults: max_results, maxCommands: MAX_COMMANDS, timeoutMs: 90000, excludePaths: exclude_paths, includeSnippets: include_snippets, mode: "deep" }, _formatResult, output_format) }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error [deep]: ${e.message}` }] };
     }
@@ -503,10 +512,19 @@ server.tool(
       ranges: z.array(z.tuple([z.number().int().min(1), z.number().int().min(1)]))
                .describe("Array of [start, end] line ranges (1-indexed, inclusive)"),
     })).describe("Files and line ranges to fetch"),
+    output_format: z
+      .enum(["text", "json"])
+      .default("text")
+      .describe("Output format. 'text' (default) for human-readable; 'json' for stable ADR-8 contract."),
   },
-  async ({ files }) => {
+  async ({ files, output_format }) => {
     try {
       const text = formatSnippetToolOutput({ files });
+      if (output_format === "json") {
+        const mapped = files.map((f) => ({ full_path: f.file, ranges: f.ranges }));
+        const snippetMap = readSnippets(mapped);
+        return { content: [{ type: "text", text: serializeSnippetResult(text, snippetMap, files, "json") }] };
+      }
       return { content: [{ type: "text", text }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error reading snippets: ${e.message}` }] };
