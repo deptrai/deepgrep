@@ -123,6 +123,83 @@ export function serializeSearchResult(result, opts, formatText, format = "text")
   );
 }
 
+// ─── Pack serialization ────────────────────────────────────
+
+function formatPackText({ snippets, dropped, meta }) {
+  // Only early-return if truly nothing to report (no snippets AND no dropped)
+  if (!snippets.length && !dropped.length) {
+    return "No context assembled. Provide files/ranges.";
+  }
+
+  const parts = [];
+  parts.push(`# Context Pack (${meta.total_chars}/${meta.budget_chars} chars, ${meta.used_pct}% budget used)`);
+  parts.push("");
+
+  if (snippets.length) {
+    // Group snippets by role preserving insertion order
+    const groups = new Map();
+    for (const s of snippets) {
+      if (!groups.has(s.role)) groups.set(s.role, []);
+      groups.get(s.role).push(s);
+    }
+
+    for (const [role, items] of groups) {
+      const heading = role.charAt(0).toUpperCase() + role.slice(1);
+      parts.push(`## ${heading}`);
+      for (const item of items) {
+        const rangeStr = (item.ranges || []).map(([s, e]) => `L${s}-${e}`).join(", ");
+        parts.push(`### ${item.path}${rangeStr ? ` (${rangeStr})` : ""}`);
+        parts.push("```");
+        parts.push(item.content);
+        parts.push("```");
+        parts.push("");
+      }
+    }
+  } else {
+    // No snippets fit within budget
+    parts.push("No snippets fit within budget.");
+    parts.push("");
+  }
+
+  if (dropped.length) {
+    const msgs = dropped.map((d) => `${d.count} ${d.role} snippet${d.count !== 1 ? "s" : ""}`);
+    parts.push(`[${msgs.join(", ")} omitted due to budget limit]`);
+  }
+
+  return parts.join("\n");
+}
+
+function toPackJsonContract({ snippets, dropped, meta }) {
+  return JSON.stringify({
+    schema_version: "1.0",
+    pack: {
+      snippets: snippets.map((s) => ({
+        role: s.role,
+        path: s.path,
+        full_path: s.full_path,
+        ranges: s.ranges,
+        content: s.content,
+      })),
+      dropped,
+      meta,
+    },
+    meta: { retrieval: "lexical", index_used: false, pack_mode: true },
+  }, null, 2);
+}
+
+/**
+ * Serialize deepgrep_pack output to text or JSON.
+ *
+ * @param {Object} packResult  — {snippets, dropped, meta}
+ * @param {Object} opts        — reserved
+ * @param {string} format      — "text" | "json"
+ * @returns {string}
+ */
+export function serializePackResult(packResult, opts = {}, format = "text") {
+  if (format === "json") return toPackJsonContract(packResult);
+  return formatPackText(packResult);
+}
+
 /**
  * Serialize deepgrep_get snippet output to text or JSON.
  *

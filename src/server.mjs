@@ -29,7 +29,8 @@ import { readSnippets } from "./snippets.mjs";
 import { getBackend } from "./backends/index.mjs";
 import { shouldEscalate } from "./escalate.mjs";
 import { friendlyError } from "./shared.mjs";
-import { serializeSearchResult, serializeSnippetResult } from "./contract.mjs";
+import { serializeSearchResult, serializeSnippetResult, serializePackResult } from "./contract.mjs";
+import { packContext } from "./pack.mjs";
 
 /**
  * Parse an integer env var with optional clamping.
@@ -541,6 +542,40 @@ server.tool(
       return { content: [{ type: "text", text }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error reading snippets: ${e.message}` }] };
+    }
+  }
+);
+
+// ─── Tool: deepgrep_pack ───────────────────────────────────
+
+server.tool(
+  "deepgrep_pack",
+  "Assemble ranked, role-labeled context pack from search results. " +
+  "Use after deepgrep_search or provide files/ranges directly. " +
+  "Budget is enforced via max_chars (required). No API key needed when files/ranges provided.",
+  {
+    query: z.string().optional().describe("Original search query (helps role detection)"),
+    files: z.array(z.object({
+      file: z.string().describe("Absolute path (full_path from deepgrep_search output)"),
+      ranges: z.array(z.tuple([z.number().int(), z.number().int()]))
+               .describe("Array of [start, end] line ranges (1-indexed, inclusive)"),
+    })).optional().describe("Files and ranges from deepgrep_search or manual input"),
+    max_chars: z.number().int().min(100).describe("Hard character budget limit (required)"),
+    max_lines: z.number().int().optional().describe("Soft line limit hint (advisory only)"),
+    rerank: z.boolean().default(false).describe("Sort source files before test/spec files"),
+    output_format: z.enum(["text", "json"]).default("text")
+      .describe("Output format. 'text' (default) for markdown; 'json' for ADR-8 contract."),
+  },
+  async ({ query, files, max_chars, max_lines, rerank, output_format }) => {
+    if (!files || files.length === 0) {
+      return { content: [{ type: "text", text: "Error: files required for deepgrep_pack" }] };
+    }
+    try {
+      const packResult = packContext({ query, files, max_chars, max_lines, rerank });
+      const text = serializePackResult(packResult, {}, output_format);
+      return { content: [{ type: "text", text }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: `Error [pack]: ${e.message}` }] };
     }
   }
 );
