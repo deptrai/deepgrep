@@ -8,6 +8,8 @@
  * JSON path builds the v1.0 schema with forward-looking retrieval/index_used fields.
  */
 
+import { rankResults } from "./rank.mjs";
+
 // ─── JSON contract helpers ─────────────────────────────────
 
 /**
@@ -108,9 +110,10 @@ function toSnippetJsonContract(snippetResult, files = []) {
  * @returns {string}
  */
 export function serializeSearchResult(result, opts, formatText, format = "text") {
-  if (format === "json") return toJsonContract(result, opts);
+  const ranked = { ...result, files: rankResults(result.files || [], opts) };
+  if (format === "json") return toJsonContract(ranked, opts);
   return formatText(
-    result,
+    ranked,
     opts.maxTurns ?? 3,
     opts.maxResults ?? 10,
     opts.maxCommands ?? 8,

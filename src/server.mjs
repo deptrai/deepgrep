@@ -270,8 +270,12 @@ server.tool(
       .enum(["text", "json"])
       .default("text")
       .describe("Output format. 'text' (default) for human-readable output; 'json' for stable machine-parseable ADR-8 contract."),
+    rerank: z
+      .boolean()
+      .default(false)
+      .describe("If true, sort results: source files before test/spec files. Default false (trusts LLM order). Dedup and range-merge always apply."),
   },
-  async ({ query, project_path, tree_depth, max_turns, max_results, exclude_paths, include_snippets, auto_escalate, output_format }) => {
+  async ({ query, project_path, tree_depth, max_turns, max_results, exclude_paths, include_snippets, auto_escalate, output_format, rerank }) => {
     let projectPath = project_path || process.cwd();
 
     try {
@@ -304,7 +308,7 @@ server.tool(
         excludePaths: exclude_paths.length ? exclude_paths : ["node_modules", "dist", ".git", "build", ".next"],
         ...deepOpts,
       });
-      let text = serializeSearchResult(result, { maxTurns: 3, maxResults: max_results, maxCommands: MAX_COMMANDS, timeoutMs: 90000, excludePaths: exclude_paths, includeSnippets: include_snippets, mode: "escalated" }, _formatResult, output_format);
+      let text = serializeSearchResult(result, { maxTurns: 3, maxResults: max_results, maxCommands: MAX_COMMANDS, timeoutMs: 90000, excludePaths: exclude_paths, includeSnippets: include_snippets, mode: "escalated", rerank }, _formatResult, output_format);
       if (output_format !== "json") {
         text += `\n[escalated to deep mode: complex query]`;
         if (refineHint) text += `\n${refineHint}`;
@@ -328,7 +332,7 @@ server.tool(
           baseUrl: DEEP_BASE_URL,
           apiKey: DEEP_API_KEY,
         });
-        text = serializeSearchResult(result, { maxTurns: max_turns, maxResults: max_results, maxCommands: MAX_COMMANDS, timeoutMs: TIMEOUT_MS, excludePaths: exclude_paths, includeSnippets: include_snippets, mode: "quick" }, _formatResult, output_format);
+        text = serializeSearchResult(result, { maxTurns: max_turns, maxResults: max_results, maxCommands: MAX_COMMANDS, timeoutMs: TIMEOUT_MS, excludePaths: exclude_paths, includeSnippets: include_snippets, mode: "quick", rerank }, _formatResult, output_format);
         if (output_format !== "json" && refineHintForOutput) text += `\n${refineHintForOutput}`;
 
         // Auto-escalate on empty results
@@ -341,7 +345,7 @@ server.tool(
             excludePaths: exclude_paths.length ? exclude_paths : ["node_modules", "dist", ".git", "build", ".next"],
             ...deepOpts,
           });
-          text = serializeSearchResult(deepResult, { maxTurns: 3, maxResults: max_results, maxCommands: MAX_COMMANDS, timeoutMs: 90000, excludePaths: exclude_paths, includeSnippets: include_snippets, mode: "escalated" }, _formatResult, output_format);
+          text = serializeSearchResult(deepResult, { maxTurns: 3, maxResults: max_results, maxCommands: MAX_COMMANDS, timeoutMs: 90000, excludePaths: exclude_paths, includeSnippets: include_snippets, mode: "escalated", rerank }, _formatResult, output_format);
           if (output_format !== "json") text += "\n[escalated to deep mode: empty result]";
         }
       } else {
@@ -354,7 +358,7 @@ server.tool(
           treeDepth: tree_depth, timeoutMs: TIMEOUT_MS,
           excludePaths: exclude_paths,
         });
-        text = serializeSearchResult(wsResult, { maxTurns: max_turns, maxResults: max_results, maxCommands: MAX_COMMANDS, timeoutMs: TIMEOUT_MS, excludePaths: exclude_paths, includeSnippets: include_snippets, mode: "quick" }, _formatResult, output_format);
+        text = serializeSearchResult(wsResult, { maxTurns: max_turns, maxResults: max_results, maxCommands: MAX_COMMANDS, timeoutMs: TIMEOUT_MS, excludePaths: exclude_paths, includeSnippets: include_snippets, mode: "quick", rerank }, _formatResult, output_format);
         if (output_format !== "json" && refineHintForOutput) text += `\n${refineHintForOutput}`;
 
         // Auto-escalate on empty results (windsurf → deep).
@@ -369,7 +373,7 @@ server.tool(
             excludePaths: exclude_paths.length ? exclude_paths : ["node_modules", "dist", ".git", "build", ".next"],
             ...deepOpts,
           });
-          text = serializeSearchResult(deepResult, { maxTurns: 3, maxResults: max_results, maxCommands: MAX_COMMANDS, timeoutMs: 90000, excludePaths: exclude_paths, includeSnippets: include_snippets, mode: "escalated" }, _formatResult, output_format);
+          text = serializeSearchResult(deepResult, { maxTurns: 3, maxResults: max_results, maxCommands: MAX_COMMANDS, timeoutMs: 90000, excludePaths: exclude_paths, includeSnippets: include_snippets, mode: "escalated", rerank }, _formatResult, output_format);
           if (output_format !== "json") text += "\n[escalated to deep mode: empty result]";
         }
       }
@@ -438,8 +442,12 @@ server.tool(
       .enum(["text", "json"])
       .default("text")
       .describe("Output format. 'text' (default) for human-readable; 'json' for stable ADR-8 contract."),
+    rerank: z
+      .boolean()
+      .default(false)
+      .describe("If true, sort results: source files before test/spec files. Default false (trusts LLM order)."),
   },
-  async ({ query, project_path, tree_depth, max_results, exclude_paths, include_snippets, output_format }) => {
+  async ({ query, project_path, tree_depth, max_results, exclude_paths, include_snippets, output_format, rerank }) => {
     // Gating: require DEEPGREP_API_KEY
     if (!DEEP_API_KEY) {
       const gatingMessage =
@@ -478,7 +486,7 @@ server.tool(
         baseUrl: DEEP_BASE_URL,
         apiKey: DEEP_API_KEY,
       });
-      return { content: [{ type: "text", text: serializeSearchResult(result, { maxTurns: 3, maxResults: max_results, maxCommands: MAX_COMMANDS, timeoutMs: 90000, excludePaths: exclude_paths, includeSnippets: include_snippets, mode: "deep" }, _formatResult, output_format) }] };
+      return { content: [{ type: "text", text: serializeSearchResult(result, { maxTurns: 3, maxResults: max_results, maxCommands: MAX_COMMANDS, timeoutMs: 90000, excludePaths: exclude_paths, includeSnippets: include_snippets, mode: "deep", rerank }, _formatResult, output_format) }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error [deep]: ${e.message}` }] };
     }
