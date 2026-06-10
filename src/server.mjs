@@ -305,8 +305,10 @@ server.tool(
         ...deepOpts,
       });
       let text = serializeSearchResult(result, { maxTurns: 3, maxResults: max_results, maxCommands: MAX_COMMANDS, timeoutMs: 90000, excludePaths: exclude_paths, includeSnippets: include_snippets, mode: "escalated" }, _formatResult, output_format);
-      text += `\n[escalated to deep mode: complex query]`;
-      if (refineHint) text += `\n${refineHint}`;
+      if (output_format !== "json") {
+        text += `\n[escalated to deep mode: complex query]`;
+        if (refineHint) text += `\n${refineHint}`;
+      }
       return { content: [{ type: "text", text }] };
     }
 
@@ -327,6 +329,7 @@ server.tool(
           apiKey: DEEP_API_KEY,
         });
         text = serializeSearchResult(result, { maxTurns: max_turns, maxResults: max_results, maxCommands: MAX_COMMANDS, timeoutMs: TIMEOUT_MS, excludePaths: exclude_paths, includeSnippets: include_snippets, mode: "quick" }, _formatResult, output_format);
+        if (output_format !== "json" && refineHintForOutput) text += `\n${refineHintForOutput}`;
 
         // Auto-escalate on empty results
         if (auto_escalate && DEEP_API_KEY && result.files?.length === 0 && !result.error) {
@@ -339,7 +342,7 @@ server.tool(
             ...deepOpts,
           });
           text = serializeSearchResult(deepResult, { maxTurns: 3, maxResults: max_results, maxCommands: MAX_COMMANDS, timeoutMs: 90000, excludePaths: exclude_paths, includeSnippets: include_snippets, mode: "escalated" }, _formatResult, output_format);
-          text += "\n[escalated to deep mode: empty result]";
+          if (output_format !== "json") text += "\n[escalated to deep mode: empty result]";
         }
       } else {
         // Default: Windsurf/SWE-1.6 (free, fast)
@@ -352,12 +355,11 @@ server.tool(
           excludePaths: exclude_paths,
         });
         text = serializeSearchResult(wsResult, { maxTurns: max_turns, maxResults: max_results, maxCommands: MAX_COMMANDS, timeoutMs: TIMEOUT_MS, excludePaths: exclude_paths, includeSnippets: include_snippets, mode: "quick" }, _formatResult, output_format);
+        if (output_format !== "json" && refineHintForOutput) text += `\n${refineHintForOutput}`;
 
         // Auto-escalate on empty results (windsurf → deep).
         const wsEmpty = !wsResult.error && (!wsResult.files || wsResult.files.length === 0);
-        const isEmpty = wsEmpty && output_format !== "json"
-          ? (text.startsWith("No relevant files found") || text.startsWith("No files found"))
-          : wsEmpty;
+        const isEmpty = wsEmpty; // structural check is authoritative; text-prefix matching was fragile
         if (auto_escalate && DEEP_API_KEY && isEmpty) {
           const deepBackend = getBackend("openai");
           const deepResult = await deepBackend.search({
@@ -522,12 +524,12 @@ server.tool(
   },
   async ({ files, output_format }) => {
     try {
-      const text = formatSnippetToolOutput({ files });
       if (output_format === "json") {
         const mapped = files.map((f) => ({ full_path: f.file, ranges: f.ranges }));
         const snippetMap = readSnippets(mapped);
-        return { content: [{ type: "text", text: serializeSnippetResult(text, snippetMap, files, "json") }] };
+        return { content: [{ type: "text", text: serializeSnippetResult("", snippetMap, files, "json") }] };
       }
+      const text = formatSnippetToolOutput({ files });
       return { content: [{ type: "text", text }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error reading snippets: ${e.message}` }] };

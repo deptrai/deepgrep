@@ -25,7 +25,7 @@ function toJsonContract(result, opts = {}) {
   const files = (result.files || []).map((f) => ({
     path: f.path,
     full_path: f.full_path,
-    ranges: f.ranges,
+    ranges: f.ranges ?? [],
     role: f.role ?? null,
     score: f.score ?? null,
   }));
@@ -50,7 +50,7 @@ function toJsonContract(result, opts = {}) {
   };
 
   if (result.error) {
-    contract.error = result.error;
+    contract.error = typeof result.error === "string" ? result.error : String(result.error);
   }
 
   return JSON.stringify(contract, null, 2);
@@ -75,12 +75,16 @@ function toSnippetJsonContract(snippetResult, files = []) {
 
   const fileResults = files.map((f) => {
     const content = snippetResult instanceof Map
-      ? (snippetResult.get(f.file) || null)
+      ? (snippetResult.get(f.file) ?? null)
       : null;
+    // path: last component(s) to match search output convention (short path)
+    // full_path: the absolute path as supplied
+    const segments = f.file.replace(/\\/g, "/").split("/");
+    const path = segments.length >= 2 ? segments.slice(-2).join("/") : f.file;
     return {
-      path: f.file,
+      path,
       full_path: f.file,
-      ranges: f.ranges,
+      ranges: f.ranges ?? [],
       content,
     };
   }).filter((f) => f.content !== null);
