@@ -559,7 +559,7 @@ server.tool(
       file: z.string().describe("Absolute path (full_path from deepgrep_search output)"),
       ranges: z.array(z.tuple([z.number().int(), z.number().int()]))
                .describe("Array of [start, end] line ranges (1-indexed, inclusive)"),
-    })).optional().describe("Files and ranges from deepgrep_search or manual input"),
+    })).min(1).describe("Files and ranges from deepgrep_search or manual input (required)"),
     max_chars: z.number().int().min(100).describe("Hard character budget limit (required)"),
     max_lines: z.number().int().optional().describe("Soft line limit hint (advisory only)"),
     rerank: z.boolean().default(false).describe("Sort source files before test/spec files"),

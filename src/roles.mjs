@@ -7,7 +7,7 @@
  */
 
 const TEST_PATTERNS    = ["/test/", ".test.", "__tests__/", "/spec/", ".spec."];
-const CONFIG_PATTERNS  = ["/config/", ".config.", "package.json", "tsconfig.json", ".env"];
+const CONFIG_PATTERNS  = ["/config/", ".config.", "package.json", "tsconfig.json", "/.env"];
 const DOCS_PATTERNS    = ["/docs/", "README", ".md"];
 const TYPE_PATTERNS    = [".d.ts", "/types/", "/interfaces/"];
 
@@ -39,6 +39,8 @@ export function labelRole({ path, full_path, query, matchDensity } = {}) {
 
 /**
  * Calculate match density (matches per line) for role detection.
+ * External utility — not called by packContext (which uses path-only heuristics).
+ * Callers with pre-read content can pass matchDensity to labelRole for richer detection.
  *
  * @param {string} content
  * @param {string} [query]
