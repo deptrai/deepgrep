@@ -51,6 +51,10 @@ function toJsonContract(result, opts = {}) {
     },
   };
 
+  if (opts.projectPaths?.length > 1) {
+    contract.meta.project_paths = opts.projectPaths;
+  }
+
   if (result.error) {
     contract.error = typeof result.error === "string" ? result.error : String(result.error);
   }
