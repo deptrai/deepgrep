@@ -5,10 +5,10 @@ import { search } from "../core.mjs";
 
 export class WindsurfBackend {
   name = "windsurf";
-  model = "SWE-1.6";
+  model = "swe-1-7";
 
   /**
-   * @param {{ query: string, projectRoot: string, maxTurns?: number, maxCommands?: number, maxResults?: number, treeDepth?: number, timeoutMs?: number, excludePaths?: string[], onProgress?: function }} opts
+   * @param {{ query: string, projectRoot: string, maxTurns?: number, maxCommands?: number, maxResults?: number, treeDepth?: number, timeoutMs?: number, excludePaths?: string[], onProgress?: function, model?: string }} opts
    */
   async search(opts) {
     return search(opts);

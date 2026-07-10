@@ -9,6 +9,9 @@
  *   DEEPGREP_API_KEY     — API key for deep search mode (get yours at https://deepgrep.chainlens.net)
  *   DEEPGREP_API_URL     — Deep search API endpoint (default: https://router.chainlens.net/v1)
  *   DEEPGREP_MODEL       — Deep search model (default: deep-search)
+ *   DEEPGREP_DEEP_BACKEND— Deep mode backend: 'openai' (default, needs API key) or 'windsurf' (free)
+ *   WS_FAST_MODEL        — Windsurf model for fast mode (default: swe-1-7)
+ *   WS_DEEP_MODEL        — Windsurf model for deep mode (default: glm-5-2-high)
  *   FC_MAX_TURNS         — Search rounds per query (default: 3)
  *   FC_MAX_COMMANDS      — Max parallel commands per round (default: 8)
  *   FC_TIMEOUT_MS        — Connect-Timeout-Ms for streaming requests (default: 30000)
@@ -51,9 +54,13 @@ const MAX_TURNS = readIntEnv("FC_MAX_TURNS", 3, { min: 1, max: 5 });
 const MAX_COMMANDS = readIntEnv("FC_MAX_COMMANDS", 8, { min: 1, max: 20 });
 const TIMEOUT_MS = readIntEnv("FC_TIMEOUT_MS", 30000, { min: 1000, max: 300000 });
 
-// Fast mode backend selection: 'windsurf' (free SWE-1.6) or 'openai' (uses DEEPGREP_API_* for any model)
+// Fast mode backend selection: 'windsurf' (free SWE-1.7) or 'openai' (uses DEEPGREP_API_* for any model)
 const FAST_BACKEND = process.env.DEEPGREP_FAST_BACKEND || "windsurf";
 const FAST_MODEL = process.env.DEEPGREP_FAST_MODEL || ""; // only used when FAST_BACKEND=openai
+
+// Windsurf model overrides (only used when backend=windsurf)
+const WS_FAST_MODEL = (process.env.WS_FAST_MODEL || "swe-1-7").trim() || "swe-1-7";
+const WS_DEEP_MODEL = (process.env.WS_DEEP_MODEL || "glm-5-2-high").trim() || "glm-5-2-high";
 
 const server = new McpServer({
   name: "deepgrep",
@@ -180,7 +187,7 @@ export function _formatResult(result, maxTurns, maxResults, maxCommands, timeout
   if (meta) {
     const fbNote = meta.fellBack ? ` (fell back)` : "";
     parts.push("");
-    let configLine = `[config] backend=${meta.backend || "windsurf"}, model=${meta.model || "SWE-1.6"}, tree_depth=${meta.treeDepth}${fbNote}, tree_size=${meta.treeSizeKB}KB, max_turns=${maxTurns}`;
+    let configLine = `[config] backend=${meta.backend || "windsurf"}, model=${meta.model || "SWE-1.7"}, tree_depth=${meta.treeDepth}${fbNote}, tree_size=${meta.treeSizeKB}KB, max_turns=${maxTurns}`;
     if (excludePaths.length) configLine += `, exclude_paths=[${excludePaths.join(", ")}]`;
     if (meta.cache_hit) configLine += `, cache_hit=true`;
     parts.push(configLine);
@@ -287,9 +294,34 @@ server.tool(
       return { content: [{ type: "text", text: `Error: project path does not exist: ${projectPath}` }] };
     }
 
-    // Deep config for escalation calls
+    // Deep config for escalation calls (OpenAI backend only)
     const deepOpts = {
       model: DEEP_MODEL, baseUrl: DEEP_BASE_URL, apiKey: DEEP_API_KEY,
+    };
+
+    // Whether deep escalation is available (windsurf backend = always free; openai = needs key)
+    const deepReady = DEEP_BACKEND === "windsurf" || !!(DEEP_API_KEY && DEEP_API_KEY.trim());
+
+    // Helper: run deep escalation search via the configured deep backend
+    const runDeepEscalation = async () => {
+      const escExclude = exclude_paths.length ? exclude_paths : ["node_modules", "dist", ".git", "build", ".next"];
+      if (DEEP_BACKEND === "windsurf") {
+        return windsurfSearch({
+          query, projectRoot: projectPath, maxTurns: 9,
+          maxCommands: MAX_COMMANDS, maxResults: max_results,
+          treeDepth: tree_depth, timeoutMs: 180000,
+          excludePaths: escExclude,
+          model: WS_DEEP_MODEL,
+        });
+      }
+      const backend = getBackend("openai");
+      return backend.search({
+        query, projectRoot: projectPath, maxTurns: 3,
+        maxCommands: MAX_COMMANDS, maxResults: max_results,
+        treeDepth: tree_depth, timeoutMs: 90000,
+        excludePaths: escExclude,
+        ...deepOpts,
+      });
     };
 
     // Evaluate escalation heuristic ONCE (local, ~0ms). refineHint applies even
@@ -299,21 +331,18 @@ server.tool(
       : { escalate: false, reason: null, refineHint: null };
 
     // Pre-escalate complex queries to deep mode before running quick
-    if (auto_escalate && DEEP_API_KEY && escalate) {
-      const backend = getBackend("openai");
-      const result = await backend.search({
-        query, projectRoot: projectPath, maxTurns: 3,
-        maxCommands: MAX_COMMANDS, maxResults: max_results,
-        treeDepth: tree_depth, timeoutMs: 90000,
-        excludePaths: exclude_paths.length ? exclude_paths : ["node_modules", "dist", ".git", "build", ".next"],
-        ...deepOpts,
-      });
-      let text = serializeSearchResult(result, { maxTurns: 3, maxResults: max_results, maxCommands: MAX_COMMANDS, timeoutMs: 90000, excludePaths: exclude_paths, includeSnippets: include_snippets, mode: "escalated", rerank }, _formatResult, output_format);
-      if (output_format !== "json") {
-        text += `\n[escalated to deep mode: complex query]`;
-        if (refineHint) text += `\n${refineHint}`;
+    if (auto_escalate && deepReady && escalate) {
+      try {
+        const result = await runDeepEscalation();
+        let text = serializeSearchResult(result, { maxTurns: 9, maxResults: max_results, maxCommands: MAX_COMMANDS, timeoutMs: 180000, excludePaths: exclude_paths, includeSnippets: include_snippets, mode: "escalated", rerank }, _formatResult, output_format);
+        if (output_format !== "json") {
+          text += `\n[escalated to deep mode: complex query]`;
+          if (refineHint) text += `\n${refineHint}`;
+        }
+        return { content: [{ type: "text", text }] };
+      } catch (escErr) {
+        // Escalation failed — fall through to quick mode instead of crashing
       }
-      return { content: [{ type: "text", text }] };
     }
 
     try {
@@ -336,20 +365,15 @@ server.tool(
         if (output_format !== "json" && refineHintForOutput) text += `\n${refineHintForOutput}`;
 
         // Auto-escalate on empty results
-        if (auto_escalate && DEEP_API_KEY && result.files?.length === 0 && !result.error) {
-          const deepBackend = getBackend("openai");
-          const deepResult = await deepBackend.search({
-            query, projectRoot: projectPath, maxTurns: 3,
-            maxCommands: MAX_COMMANDS, maxResults: max_results,
-            treeDepth: tree_depth, timeoutMs: 90000,
-            excludePaths: exclude_paths.length ? exclude_paths : ["node_modules", "dist", ".git", "build", ".next"],
-            ...deepOpts,
-          });
-          text = serializeSearchResult(deepResult, { maxTurns: 3, maxResults: max_results, maxCommands: MAX_COMMANDS, timeoutMs: 90000, excludePaths: exclude_paths, includeSnippets: include_snippets, mode: "escalated", rerank }, _formatResult, output_format);
-          if (output_format !== "json") text += "\n[escalated to deep mode: empty result]";
+        if (auto_escalate && deepReady && result.files?.length === 0 && !result.error) {
+          try {
+            const deepResult = await runDeepEscalation();
+            text = serializeSearchResult(deepResult, { maxTurns: 9, maxResults: max_results, maxCommands: MAX_COMMANDS, timeoutMs: 180000, excludePaths: exclude_paths, includeSnippets: include_snippets, mode: "escalated", rerank }, _formatResult, output_format);
+            if (output_format !== "json") text += "\n[escalated to deep mode: empty result]";
+          } catch { /* escalation failed — keep quick result */ }
         }
       } else {
-        // Default: Windsurf/SWE-1.6 (free, fast)
+        // Default: Windsurf/SWE-1.7 (free, fast)
         // Use windsurfSearch directly so output_format reaches serializeSearchResult
         // with no intermediate conditional (mirrors deepgrep_deep pattern).
         const wsResult = await windsurfSearch({
@@ -357,6 +381,7 @@ server.tool(
           maxCommands: MAX_COMMANDS, maxResults: max_results,
           treeDepth: tree_depth, timeoutMs: TIMEOUT_MS,
           excludePaths: exclude_paths,
+          model: WS_FAST_MODEL,
         });
         text = serializeSearchResult(wsResult, { maxTurns: max_turns, maxResults: max_results, maxCommands: MAX_COMMANDS, timeoutMs: TIMEOUT_MS, excludePaths: exclude_paths, includeSnippets: include_snippets, mode: "quick", rerank }, _formatResult, output_format);
         if (output_format !== "json" && refineHintForOutput) text += `\n${refineHintForOutput}`;
@@ -364,17 +389,12 @@ server.tool(
         // Auto-escalate on empty results (windsurf → deep).
         const wsEmpty = !wsResult.error && (!wsResult.files || wsResult.files.length === 0);
         const isEmpty = wsEmpty; // structural check is authoritative; text-prefix matching was fragile
-        if (auto_escalate && DEEP_API_KEY && isEmpty) {
-          const deepBackend = getBackend("openai");
-          const deepResult = await deepBackend.search({
-            query, projectRoot: projectPath, maxTurns: 3,
-            maxCommands: MAX_COMMANDS, maxResults: max_results,
-            treeDepth: tree_depth, timeoutMs: 90000,
-            excludePaths: exclude_paths.length ? exclude_paths : ["node_modules", "dist", ".git", "build", ".next"],
-            ...deepOpts,
-          });
-          text = serializeSearchResult(deepResult, { maxTurns: 3, maxResults: max_results, maxCommands: MAX_COMMANDS, timeoutMs: 90000, excludePaths: exclude_paths, includeSnippets: include_snippets, mode: "escalated", rerank }, _formatResult, output_format);
-          if (output_format !== "json") text += "\n[escalated to deep mode: empty result]";
+        if (auto_escalate && deepReady && isEmpty) {
+          try {
+            const deepResult = await runDeepEscalation();
+            text = serializeSearchResult(deepResult, { maxTurns: 9, maxResults: max_results, maxCommands: MAX_COMMANDS, timeoutMs: 180000, excludePaths: exclude_paths, includeSnippets: include_snippets, mode: "escalated", rerank }, _formatResult, output_format);
+            if (output_format !== "json") text += "\n[escalated to deep mode: empty result]";
+          } catch { /* escalation failed — keep quick result */ }
         }
       }
       return { content: [{ type: "text", text }] };
@@ -400,6 +420,9 @@ server.tool(
 const DEEP_BASE_URL = process.env.DEEPGREP_API_URL || "https://router.chainlens.net/v1";
 const DEEP_API_KEY = process.env.DEEPGREP_API_KEY || "";
 const DEEP_MODEL = process.env.DEEPGREP_MODEL || "deep-search";
+// Allow deep mode to use the free Windsurf backend (SWE-grep protocol) instead of
+// the OpenAI-compatible backend. When "windsurf", DEEPGREP_API_KEY is not required.
+const DEEP_BACKEND = (process.env.DEEPGREP_DEEP_BACKEND || "openai").trim().toLowerCase() || "openai";
 
 server.tool(
   "deepgrep_deep",
@@ -448,15 +471,16 @@ server.tool(
       .describe("If true, sort results: source files before test/spec files. Default false (trusts LLM order)."),
   },
   async ({ query, project_path, tree_depth, max_results, exclude_paths, include_snippets, output_format, rerank }) => {
-    // Gating: require DEEPGREP_API_KEY
-    if (!DEEP_API_KEY) {
+    // Gating: require DEEPGREP_API_KEY only for OpenAI backend
+    if (DEEP_BACKEND !== "windsurf" && !DEEP_API_KEY) {
       const gatingMessage =
         `⚡ Deep search requires an API key.\n\n` +
         `Get yours free (includes 10 deep queries/day):\n` +
         `  → https://deepgrep.chainlens.net\n\n` +
         `Then add to your MCP config:\n` +
         `  "env": { "DEEPGREP_API_KEY": "your-key" }\n\n` +
-        `💡 Tip: fast mode (deepgrep_search) works free without a key.`;
+        `💡 Tip: fast mode (deepgrep_search) works free without a key.\n` +
+        `💡 Or set DEEPGREP_DEEP_BACKEND=windsurf to use the free Windsurf backend for deep mode.`;
       return { content: [{ type: "text", text: gatingMessage }] };
     }
 
@@ -470,23 +494,35 @@ server.tool(
       return { content: [{ type: "text", text: `Error: project path does not exist: ${projectPath}` }] };
     }
 
-    // Use OpenAI backend with per-call config via opts — no process.env mutation
     try {
+      if (DEEP_BACKEND === "windsurf") {
+        // Use Windsurf backend (free, no API key needed) — same SWE-grep protocol
+        // as fast mode but with more turns and longer timeout for thorough search.
+        const wsResult = await windsurfSearch({
+          query, projectRoot: projectPath, maxTurns: 9,
+          maxCommands: MAX_COMMANDS, maxResults: max_results,
+          treeDepth: tree_depth, timeoutMs: 180000,
+          excludePaths: exclude_paths.length ? exclude_paths : ["node_modules", "dist", ".git", "build", ".next"],
+          model: WS_DEEP_MODEL,
+        });
+        return { content: [{ type: "text", text: serializeSearchResult(wsResult, { maxTurns: 9, maxResults: max_results, maxCommands: MAX_COMMANDS, timeoutMs: 180000, excludePaths: exclude_paths, includeSnippets: include_snippets, mode: "deep", rerank }, _formatResult, output_format) }] };
+      }
+      // Default: OpenAI backend with per-call config via opts — no process.env mutation
       const backend = getBackend("openai");
       const result = await backend.search({
         query,
         projectRoot: projectPath,
-        maxTurns: 3,
+        maxTurns: 9,
         maxCommands: MAX_COMMANDS,
         maxResults: max_results,
         treeDepth: tree_depth,
-        timeoutMs: 90000,
+        timeoutMs: 180000,
         excludePaths: exclude_paths.length ? exclude_paths : ["node_modules", "dist", ".git", "build", ".next"],
         model: DEEP_MODEL,
         baseUrl: DEEP_BASE_URL,
         apiKey: DEEP_API_KEY,
       });
-      return { content: [{ type: "text", text: serializeSearchResult(result, { maxTurns: 3, maxResults: max_results, maxCommands: MAX_COMMANDS, timeoutMs: 90000, excludePaths: exclude_paths, includeSnippets: include_snippets, mode: "deep", rerank }, _formatResult, output_format) }] };
+      return { content: [{ type: "text", text: serializeSearchResult(result, { maxTurns: 9, maxResults: max_results, maxCommands: MAX_COMMANDS, timeoutMs: 180000, excludePaths: exclude_paths, includeSnippets: include_snippets, mode: "deep", rerank }, _formatResult, output_format) }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error [deep]: ${e.message}` }] };
     }

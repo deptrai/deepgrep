@@ -85,7 +85,7 @@ const AUTH_BASE = "https://server.self-serve.windsurf.com/exa.auth_pb.AuthServic
 const WS_APP = "windsurf";
 const WS_APP_VER = process.env.WS_APP_VER || "1.48.2";
 const WS_LS_VER = process.env.WS_LS_VER || "1.9544.35";
-const WS_MODEL = process.env.WS_MODEL || "MODEL_SWE_1_6_SLOW";
+const WS_MODEL = process.env.WS_MODEL || "swe-1-7";
 
 // ─── System Prompt ─────────────────────────────────────────
 
@@ -463,10 +463,10 @@ async function fetchJwt(apiKey) {
  * @param {string} jwt
  * @returns {Promise<boolean>}
  */
-async function checkRateLimit(apiKey, jwt) {
+async function checkRateLimit(apiKey, jwt, model = WS_MODEL) {
   const req = new ProtobufEncoder();
   req.writeMessage(1, _buildMetadata(apiKey, jwt));
-  req.writeString(3, WS_MODEL);
+  req.writeString(3, model);
 
   try {
     await _unaryRequest(`${API_BASE}/CheckUserMessageRateLimit`, req.toBuffer(), true);
@@ -563,9 +563,10 @@ function _buildChatMessage(role, content, opts = {}) {
  * @param {string} jwt
  * @param {Array} messages
  * @param {string} toolDefs
+ * @param {string} [model] - Model identifier to include in the request
  * @returns {Buffer}
  */
-function _buildRequest(apiKey, jwt, messages, toolDefs) {
+function _buildRequest(apiKey, jwt, messages, toolDefs, model = null) {
   const req = new ProtobufEncoder();
   req.writeMessage(1, _buildMetadata(apiKey, jwt));
 
@@ -580,6 +581,7 @@ function _buildRequest(apiKey, jwt, messages, toolDefs) {
   }
 
   req.writeString(3, toolDefs);
+  if (model) req.writeString(4, model);
   return req.toBuffer();
 }
 
@@ -701,6 +703,7 @@ function _parseResponse(data) {
  * @param {number} [opts.timeoutMs=30000] - Connect-Timeout-Ms for streaming requests
  * @param {string[]} [opts.excludePaths=[]] - Patterns to exclude from tree
  * @param {function} [opts.onProgress] - Progress callback
+ * @param {string} [opts.model] - Override WS_MODEL for this call (e.g. "swe-1-7", "glm-5-2")
  * @returns {Promise<Object>}
  */
 export async function search({
@@ -715,9 +718,13 @@ export async function search({
   timeoutMs = 30000,
   excludePaths = [],
   onProgress = null,
+  model = null,
 }) {
   const log = (msg) => onProgress?.(msg);
   projectRoot = resolve(projectRoot);
+
+  // Use per-call model override or fall back to module default
+  const effectiveModel = model || WS_MODEL;
 
   // Get credentials
   if (!apiKey) {
@@ -730,7 +737,7 @@ export async function search({
 
   // Check rate limit
   log("Checking rate limit...");
-  if (!(await checkRateLimit(apiKey, jwt))) {
+  if (!(await checkRateLimit(apiKey, jwt, effectiveModel))) {
     return { files: [], error: "Rate limited, please try again later" };
   }
 
@@ -743,11 +750,11 @@ export async function search({
 
   // Cache check (mtimeHash detects file CONTENT changes the tree string misses)
   const mtimeHash = computeMtimeHash(projectRoot, excludePaths);
-  const cacheKey = buildCacheKey({ query, model: WS_MODEL, maxTurns, maxResults, treeDepth, repoMapHash: repoMap, mtimeHash, excludePaths });
+  const cacheKey = buildCacheKey({ query, model: effectiveModel, maxTurns, maxResults, treeDepth, repoMapHash: repoMap, mtimeHash, excludePaths });
   const cached = getCachedResult(cacheKey);
   if (cached) {
     log("Cache hit");
-    return { ...cached, _meta: { ...cached._meta, cache_hit: true } };
+    return { ...cached, _meta: { ...cached._meta, cache_hit: true, model: cached._meta?.model || effectiveModel } };
   }
 
   const userContent = `Problem Statement: ${query}\n\nRepo Map (tree -L ${actualDepth} /codebase):\n\`\`\`text\n${repoMap}\n\`\`\``;
@@ -766,19 +773,19 @@ export async function search({
   for (let turn = 0; turn < totalApiCalls + compensatedTurns; turn++) {
     log(`Turn ${turn + 1}/${totalApiCalls}`);
 
-    const proto = _buildRequest(apiKey, jwt, messages, toolDefs);
+    const proto = _buildRequest(apiKey, jwt, messages, toolDefs, effectiveModel);
     let respData;
     try {
       respData = await _streamingRequest(proto, timeoutMs);
     } catch (e) {
       const errCode = e.code || "UNKNOWN";
-      const baseMeta = { treeDepth: actualDepth, treeSizeKB: +(treeSizeBytes / 1024).toFixed(1), fellBack, projectRoot, errorCode: errCode };
+      const baseMeta = { treeDepth: actualDepth, treeSizeKB: +(treeSizeBytes / 1024).toFixed(1), fellBack, projectRoot, errorCode: errCode, model: effectiveModel };
 
       // Auto-retry with trimmed context on payload/timeout errors
       if ((errCode === "PAYLOAD_TOO_LARGE" || errCode === "TIMEOUT") && messages.length > 4) {
         log(`${errCode} on turn ${turn + 1}: trimming context and retrying...`);
         _trimMessages(messages);
-        const retryProto = _buildRequest(apiKey, jwt, messages, toolDefs);
+        const retryProto = _buildRequest(apiKey, jwt, messages, toolDefs, effectiveModel);
         try {
           respData = await _streamingRequest(retryProto, timeoutMs);
         } catch (retryErr) {
@@ -814,7 +821,7 @@ export async function search({
       log("Received final answer");
       const result = _parseAnswer(answerXml, projectRoot);
       result.rg_patterns = [...new Set(executor.collectedRgPatterns)];
-      result._meta = { treeDepth: actualDepth, treeSizeKB: +(treeSizeBytes / 1024).toFixed(1), fellBack, cache_hit: false };
+      result._meta = { treeDepth: actualDepth, treeSizeKB: +(treeSizeBytes / 1024).toFixed(1), fellBack, cache_hit: false, model: effectiveModel };
       // AC#3: skip caching empty results so auto-escalation can retry next time
       if (result.files?.length > 0) {
         setCachedResult(cacheKey, result);
@@ -868,7 +875,7 @@ export async function search({
     files: [],
     error: "Max turns reached without getting an answer",
     rg_patterns: [...new Set(executor.collectedRgPatterns)],
-    _meta: { treeDepth: actualDepth, treeSizeKB: +(treeSizeBytes / 1024).toFixed(1), fellBack, projectRoot },
+    _meta: { treeDepth: actualDepth, treeSizeKB: +(treeSizeBytes / 1024).toFixed(1), fellBack, projectRoot, model: effectiveModel },
   };
 }
 

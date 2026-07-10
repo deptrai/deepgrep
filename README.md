@@ -229,7 +229,7 @@ deepgrep works with **any OpenAI-compatible API**:
 }
 ```
 
-**Devin Desktop users:** If you have Devin Desktop installed, fast mode auto-detects your local credentials (free SWE-1.6). No config needed — just omit `DEEPGREP_FAST_BACKEND`.
+**Devin Desktop users:** If you have Devin Desktop installed, fast mode auto-detects your local credentials (free SWE-1.7). No config needed — just omit `DEEPGREP_FAST_BACKEND`.
 
 ## Environment Variables
 
@@ -424,7 +424,7 @@ Add to `~/Library/Application Support/Devin/User/globalStorage/mcp_config.json` 
 }
 ```
 
-> 💡 **Devin Desktop bonus:** deepgrep auto-detects your local Devin credentials for fast mode. Omit `DEEPGREP_FAST_BACKEND` and `DEEPGREP_FAST_MODEL` to use free SWE-1.6 automatically.
+> 💡 **Devin Desktop bonus:** deepgrep auto-detects your local Devin credentials for fast mode. Omit `DEEPGREP_FAST_BACKEND` and `DEEPGREP_FAST_MODEL` to use free SWE-1.7 automatically.
 
 #### Codex CLI (OpenAI)
 
