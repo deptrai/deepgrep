@@ -18,6 +18,10 @@ const MULTI_HOP_KEYWORDS = [
   "full path", "all the way", "step by step", "entire flow",
 ];
 
+// Pre-compiled at module load — avoids new RegExp(kw, "i") on every shouldEscalate() call.
+// Benchmark showed this was the main cost for non-escalating queries (~0.0019ms → ~0.0005ms).
+const MULTI_HOP_REGEXPS = MULTI_HOP_KEYWORDS.map(kw => new RegExp(kw, "i"));
+
 // Clause separators that indicate multiple requirements in one query.
 // Ordered longest-first so overlapping separators (", and " ⊃ " and ") are
 // consumed once and not double-counted.
@@ -46,15 +50,9 @@ export function shouldEscalate(query) {
     : null;
 
   // 1. Multi-hop keyword detection (highest signal)
-  for (const kw of MULTI_HOP_KEYWORDS) {
-    if (kw.includes(".*")) {
-      // Simple regex pattern
-      const re = new RegExp(kw, "i");
-      if (re.test(q)) {
-        return { escalate: true, reason: `multi-hop keyword: "${kw}"`, refineHint };
-      }
-    } else if (q.includes(kw)) {
-      return { escalate: true, reason: `multi-hop keyword: "${kw}"`, refineHint };
+  for (let i = 0; i < MULTI_HOP_REGEXPS.length; i++) {
+    if (MULTI_HOP_REGEXPS[i].test(q)) {
+      return { escalate: true, reason: `multi-hop keyword: "${MULTI_HOP_KEYWORDS[i]}"`, refineHint };
     }
   }
 

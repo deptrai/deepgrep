@@ -32,7 +32,8 @@ import { readSnippets } from "./snippets.mjs";
 import { getBackend } from "./backends/index.mjs";
 import { shouldEscalate } from "./escalate.mjs";
 import { friendlyError } from "./shared.mjs";
-import { serializeSearchResult, serializeSnippetResult } from "./contract.mjs";
+import { serializeSearchResult, serializeSnippetResult, serializePackResult } from "./contract.mjs";
+import { packContext } from "./pack.mjs";
 
 /**
  * Parse an integer env var with optional clamping.
@@ -109,6 +110,37 @@ export function formatSnippetToolOutput({ files }) {
   }
 
   return parts.length ? parts.join("\n") : "No snippets found for given ranges.";
+}
+
+/**
+ * Merge results from Promise.allSettled cross-repo search.
+ *
+ * @param {PromiseSettledResult[]} settled — results from Promise.allSettled
+ * @param {string[]} paths — the paths array (same order as settled)
+ * @returns {{ merged: Object, warnings: string[], hasAny: boolean }}
+ */
+export function mergeSettledResults(settled, paths) {
+  const allFiles = [];
+  const rgPatterns = [];
+  const warnings = [];
+  let metaFromFirst = null;
+
+  for (let i = 0; i < settled.length; i++) {
+    if (settled[i].status === "fulfilled") {
+      const r = settled[i].value;
+      allFiles.push(...(r.files || []));
+      rgPatterns.push(...(r.rg_patterns || []));
+      if (!metaFromFirst) metaFromFirst = { ...(r._meta || {}) };
+    } else {
+      warnings.push(`⚠️ Path failed: ${paths[i]} — ${settled[i].reason?.message || "unknown error"}`);
+    }
+  }
+
+  return {
+    merged: { files: allFiles, rg_patterns: rgPatterns, _meta: metaFromFirst || {} },
+    warnings,
+    hasAny: metaFromFirst !== null,
+  };
 }
 
 // ─── Tool: deepgrep_search ─────────────────────────────────
@@ -281,8 +313,73 @@ server.tool(
       .boolean()
       .default(false)
       .describe("If true, sort results: source files before test/spec files. Default false (trusts LLM order). Dedup and range-merge always apply."),
+    project_paths: z
+      .array(z.string())
+      .optional()
+      .describe("Multiple project roots to search in parallel. When provided, overrides project_path."),
+    max_results_per_path: z
+      .number()
+      .int()
+      .min(1)
+      .max(30)
+      .default(10)
+      .optional()
+      .describe("Max results per repo path (default: 10). Controls cross-repo result volume."),
   },
-  async ({ query, project_path, tree_depth, max_turns, max_results, exclude_paths, include_snippets, auto_escalate, output_format, rerank }) => {
+  async ({ query, project_path, project_paths, max_results_per_path, tree_depth, max_turns, max_results, exclude_paths, include_snippets, auto_escalate, output_format, rerank }) => {
+    // ── Multi-path branch ─────────────────────────────────────
+    if (Array.isArray(project_paths)) {
+      if (project_paths.length === 0) {
+        return { content: [{ type: "text", text: "Error: project_paths must not be empty" }] };
+      }
+      const perPathMax = max_results_per_path ?? 10;
+      const { statSync } = await import("node:fs");
+
+      const settled = await Promise.allSettled(
+        project_paths.map(async (p) => {
+          let isDir = false;
+          try { isDir = statSync(p).isDirectory(); } catch { /* path doesn't exist */ }
+          if (!isDir) throw new Error(`project path does not exist or is not a directory: ${p}`);
+
+          if (FAST_BACKEND === "openai") {
+            const backend = getBackend("openai");
+            return await backend.search({
+              query, projectRoot: p, maxTurns: max_turns,
+              maxCommands: MAX_COMMANDS, maxResults: perPathMax,
+              treeDepth: tree_depth, timeoutMs: TIMEOUT_MS + 30000,
+              excludePaths: exclude_paths,
+              model: FAST_MODEL || DEEP_MODEL,
+              baseUrl: DEEP_BASE_URL,
+              apiKey: DEEP_API_KEY,
+            });
+          } else {
+            return await windsurfSearch({
+              query, projectRoot: p, maxTurns: max_turns,
+              maxCommands: MAX_COMMANDS, maxResults: perPathMax,
+              treeDepth: tree_depth, timeoutMs: TIMEOUT_MS,
+              excludePaths: exclude_paths,
+            });
+          }
+        })
+      );
+
+      const { merged, warnings, hasAny } = mergeSettledResults(settled, project_paths);
+      if (!hasAny) {
+        return { content: [{ type: "text", text: `All paths failed:\n${warnings.join("\n")}` }] };
+      }
+
+      let text = serializeSearchResult(
+        merged,
+        { maxTurns: max_turns, maxResults: max_results, maxCommands: MAX_COMMANDS, timeoutMs: TIMEOUT_MS, excludePaths: exclude_paths, includeSnippets: include_snippets, mode: "quick", rerank, projectPaths: project_paths },
+        _formatResult,
+        output_format
+      );
+      if (warnings.length && output_format !== "json") {
+        text += `\n${warnings.join("\n")}`;
+      }
+      return { content: [{ type: "text", text }] };
+    }
+
     let projectPath = project_path || process.cwd();
 
     try {
@@ -469,10 +566,22 @@ server.tool(
       .boolean()
       .default(false)
       .describe("If true, sort results: source files before test/spec files. Default false (trusts LLM order)."),
+    project_paths: z
+      .array(z.string())
+      .optional()
+      .describe("Multiple project roots to search in parallel. When provided, overrides project_path."),
+    max_results_per_path: z
+      .number()
+      .int()
+      .min(1)
+      .max(30)
+      .default(10)
+      .optional()
+      .describe("Max results per repo path (default: 10). Controls cross-repo result volume."),
   },
-  async ({ query, project_path, tree_depth, max_results, exclude_paths, include_snippets, output_format, rerank }) => {
-    // Gating: require DEEPGREP_API_KEY only for OpenAI backend
-    if (DEEP_BACKEND !== "windsurf" && !DEEP_API_KEY) {
+  async ({ query, project_path, project_paths, max_results_per_path, tree_depth, max_results, exclude_paths, include_snippets, output_format, rerank }) => {
+    // Gating: require DEEPGREP_API_KEY
+    if (!DEEP_API_KEY) {
       const gatingMessage =
         `⚡ Deep search requires an API key.\n\n` +
         `Get yours free (includes 10 deep queries/day):\n` +
@@ -482,6 +591,48 @@ server.tool(
         `💡 Tip: fast mode (deepgrep_search) works free without a key.\n` +
         `💡 Or set DEEPGREP_DEEP_BACKEND=windsurf to use the free Windsurf backend for deep mode.`;
       return { content: [{ type: "text", text: gatingMessage }] };
+    }
+
+    // ── Multi-path branch ─────────────────────────────────────
+    if (Array.isArray(project_paths)) {
+      if (project_paths.length === 0) {
+        return { content: [{ type: "text", text: "Error: project_paths must not be empty" }] };
+      }
+      const perPathMax = max_results_per_path ?? 10;
+      const { statSync } = await import("node:fs");
+      const backend = getBackend("openai");
+
+      const settled = await Promise.allSettled(
+        project_paths.map(async (p) => {
+          let isDir = false;
+          try { isDir = statSync(p).isDirectory(); } catch { /* path doesn't exist */ }
+          if (!isDir) throw new Error(`project path does not exist or is not a directory: ${p}`);
+
+          return await backend.search({
+            query, projectRoot: p, maxTurns: 3,
+            maxCommands: MAX_COMMANDS, maxResults: perPathMax,
+            treeDepth: tree_depth, timeoutMs: 90000,
+            excludePaths: exclude_paths.length ? exclude_paths : ["node_modules", "dist", ".git", "build", ".next"],
+            model: DEEP_MODEL, baseUrl: DEEP_BASE_URL, apiKey: DEEP_API_KEY,
+          });
+        })
+      );
+
+      const { merged, warnings, hasAny } = mergeSettledResults(settled, project_paths);
+      if (!hasAny) {
+        return { content: [{ type: "text", text: `All paths failed:\n${warnings.join("\n")}` }] };
+      }
+
+      let text = serializeSearchResult(
+        merged,
+        { maxTurns: 3, maxResults: max_results, maxCommands: MAX_COMMANDS, timeoutMs: 90000, excludePaths: exclude_paths, includeSnippets: include_snippets, mode: "deep", rerank, projectPaths: project_paths },
+        _formatResult,
+        output_format
+      );
+      if (warnings.length && output_format !== "json") {
+        text += `\n${warnings.join("\n")}`;
+      }
+      return { content: [{ type: "text", text }] };
     }
 
     let projectPath = project_path || process.cwd();
@@ -577,6 +728,40 @@ server.tool(
       return { content: [{ type: "text", text }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error reading snippets: ${e.message}` }] };
+    }
+  }
+);
+
+// ─── Tool: deepgrep_pack ───────────────────────────────────
+
+server.tool(
+  "deepgrep_pack",
+  "Assemble ranked, role-labeled context pack from search results. " +
+  "Use after deepgrep_search or provide files/ranges directly. " +
+  "Budget is enforced via max_chars (required). No API key needed when files/ranges provided.",
+  {
+    query: z.string().optional().describe("Original search query (helps role detection)"),
+    files: z.array(z.object({
+      file: z.string().describe("Absolute path (full_path from deepgrep_search output)"),
+      ranges: z.array(z.tuple([z.number().int(), z.number().int()]))
+               .describe("Array of [start, end] line ranges (1-indexed, inclusive)"),
+    })).min(1).describe("Files and ranges from deepgrep_search or manual input (required)"),
+    max_chars: z.number().int().min(100).describe("Hard character budget limit (required)"),
+    max_lines: z.number().int().optional().describe("Soft line limit hint (advisory only)"),
+    rerank: z.boolean().default(false).describe("Sort source files before test/spec files"),
+    output_format: z.enum(["text", "json"]).default("text")
+      .describe("Output format. 'text' (default) for markdown; 'json' for ADR-8 contract."),
+  },
+  async ({ query, files, max_chars, max_lines, rerank, output_format }) => {
+    if (!files || files.length === 0) {
+      return { content: [{ type: "text", text: "Error: files required for deepgrep_pack" }] };
+    }
+    try {
+      const packResult = packContext({ query, files, max_chars, max_lines, rerank });
+      const text = serializePackResult(packResult, {}, output_format);
+      return { content: [{ type: "text", text }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: `Error [pack]: ${e.message}` }] };
     }
   }
 );
